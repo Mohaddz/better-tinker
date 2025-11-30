@@ -1,0 +1,10 @@
+# Tinker Bridge Server Dependencies
+fastapi>=0.104.0
+uvicorn[standard]>=0.24.0
+pydantic>=2.0.0
+keyring>=24.0.0
+
+# Tinker SDK - install from ThinkingMachines
+# pip install tinker
+# or if available via pip:
+tinker
