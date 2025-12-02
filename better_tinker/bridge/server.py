@@ -21,6 +21,66 @@ try:
 except ImportError:
     keyring = None
 
+# Windows-specific credential reading (to match Go's go-keyring format)
+def get_api_key_from_windows_credential_manager():
+    """
+    Read API key from Windows Credential Manager using Go's go-keyring format.
+    Go stores: TargetName="tinker-cli", UserName="api-key", CredentialBlob=<password>
+    """
+    import platform
+    if platform.system() != "Windows":
+        return None
+        
+    try:
+        import ctypes
+        from ctypes import wintypes
+        
+        # Windows Credential Manager API
+        advapi32 = ctypes.windll.advapi32
+        
+        CRED_TYPE_GENERIC = 1
+        
+        class CREDENTIAL(ctypes.Structure):
+            _fields_ = [
+                ("Flags", wintypes.DWORD),
+                ("Type", wintypes.DWORD),
+                ("TargetName", wintypes.LPWSTR),
+                ("Comment", wintypes.LPWSTR),
+                ("LastWritten", wintypes.FILETIME),
+                ("CredentialBlobSize", wintypes.DWORD),
+                ("CredentialBlob", ctypes.POINTER(ctypes.c_ubyte)),
+                ("Persist", wintypes.DWORD),
+                ("AttributeCount", wintypes.DWORD),
+                ("Attributes", ctypes.c_void_p),
+                ("TargetAlias", wintypes.LPWSTR),
+                ("UserName", wintypes.LPWSTR),
+            ]
+        
+        PCREDENTIAL = ctypes.POINTER(CREDENTIAL)
+        
+        advapi32.CredReadW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, ctypes.POINTER(PCREDENTIAL)]
+        advapi32.CredReadW.restype = wintypes.BOOL
+        advapi32.CredFree.argtypes = [ctypes.c_void_p]
+        
+        cred_ptr = PCREDENTIAL()
+        
+        # Go's go-keyring uses "{service}:{username}" as TargetName
+        target_name = "tinker-cli:api-key"
+        if advapi32.CredReadW(target_name, CRED_TYPE_GENERIC, 0, ctypes.byref(cred_ptr)):
+            try:
+                cred = cred_ptr.contents
+                # Get the password from CredentialBlob
+                password_bytes = bytes(cred.CredentialBlob[i] for i in range(cred.CredentialBlobSize))
+                return password_bytes.decode('utf-8')
+            finally:
+                advapi32.CredFree(cred_ptr)
+        return None
+    except Exception as e:
+        print(f"⚠ Windows credential read failed: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
+
 # Tinker SDK imports
 try:
     import tinker
@@ -122,16 +182,27 @@ async def lifespan(app: FastAPI):
         api_key = os.environ.get("TINKER_API_KEY")
         
         # Try to get from keyring if not in env
-        if not api_key and keyring:
-            try:
-                # Service name matches what is used in Go (tinker-cli)
-                api_key = keyring.get_password("tinker-cli", "api-key")
+        if not api_key:
+            import platform
+            current_platform = platform.system()
+            
+            # On Windows, use direct Windows Credential Manager access
+            # (Go's go-keyring stores credentials with TargetName="{service}:{username}")
+            if current_platform == "Windows":
+                api_key = get_api_key_from_windows_credential_manager()
                 if api_key:
-                    print("✓ API key retrieved from system keyring")
-                    # Set it in environment for SDK
+                    print("✓ API key retrieved from Windows Credential Manager")
                     os.environ["TINKER_API_KEY"] = api_key
-            except Exception as e:
-                print(f"⚠ Failed to retrieve API key from keyring: {e}")
+            
+            # On macOS/Linux, Python keyring is compatible with Go's go-keyring
+            if not api_key and keyring:
+                try:
+                    api_key = keyring.get_password("tinker-cli", "api-key")
+                    if api_key:
+                        print("✓ API key retrieved from system keyring")
+                        os.environ["TINKER_API_KEY"] = api_key
+                except Exception as e:
+                    print(f"⚠ Failed to retrieve API key from keyring: {e}")
 
         if api_key:
             try:
