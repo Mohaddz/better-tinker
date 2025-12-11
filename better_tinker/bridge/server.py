@@ -3,83 +3,23 @@ Tinker Bridge Server - REST API bridge for Tinker Python SDK
 
 This FastAPI server provides a REST API that wraps the Tinker Python SDK,
 allowing the Go CLI to interact with Tinker services.
+
+API Key Flow:
+1. Go CLI reads API key from keyring/env (single access)
+2. Go CLI passes API key to bridge via Authorization header
+3. Bridge uses the API key from header (NO second keyring access)
+4. This eliminates double password prompts on macOS
 """
 
 import os
-import asyncio
-from typing import Optional, List
+import threading
+from typing import Optional, List, Dict
 from datetime import datetime
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-
-# Try to import keyring for credential access
-try:
-    import keyring
-except ImportError:
-    keyring = None
-
-# Windows-specific credential reading (to match Go's go-keyring format)
-def get_api_key_from_windows_credential_manager():
-    """
-    Read API key from Windows Credential Manager using Go's go-keyring format.
-    Go stores: TargetName="tinker-cli", UserName="api-key", CredentialBlob=<password>
-    """
-    import platform
-    if platform.system() != "Windows":
-        return None
-        
-    try:
-        import ctypes
-        from ctypes import wintypes
-        
-        # Windows Credential Manager API
-        advapi32 = ctypes.windll.advapi32
-        
-        CRED_TYPE_GENERIC = 1
-        
-        class CREDENTIAL(ctypes.Structure):
-            _fields_ = [
-                ("Flags", wintypes.DWORD),
-                ("Type", wintypes.DWORD),
-                ("TargetName", wintypes.LPWSTR),
-                ("Comment", wintypes.LPWSTR),
-                ("LastWritten", wintypes.FILETIME),
-                ("CredentialBlobSize", wintypes.DWORD),
-                ("CredentialBlob", ctypes.POINTER(ctypes.c_ubyte)),
-                ("Persist", wintypes.DWORD),
-                ("AttributeCount", wintypes.DWORD),
-                ("Attributes", ctypes.c_void_p),
-                ("TargetAlias", wintypes.LPWSTR),
-                ("UserName", wintypes.LPWSTR),
-            ]
-        
-        PCREDENTIAL = ctypes.POINTER(CREDENTIAL)
-        
-        advapi32.CredReadW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, ctypes.POINTER(PCREDENTIAL)]
-        advapi32.CredReadW.restype = wintypes.BOOL
-        advapi32.CredFree.argtypes = [ctypes.c_void_p]
-        
-        cred_ptr = PCREDENTIAL()
-        
-        # Go's go-keyring uses "{service}:{username}" as TargetName
-        target_name = "tinker-cli:api-key"
-        if advapi32.CredReadW(target_name, CRED_TYPE_GENERIC, 0, ctypes.byref(cred_ptr)):
-            try:
-                cred = cred_ptr.contents
-                # Get the password from CredentialBlob
-                password_bytes = bytes(cred.CredentialBlob[i] for i in range(cred.CredentialBlobSize))
-                return password_bytes.decode('utf-8')
-            finally:
-                advapi32.CredFree(cred_ptr)
-        return None
-    except Exception as e:
-        print(f"⚠ Windows credential read failed: {e}")
-        import traceback
-        traceback.print_exc()
-        return None
 
 # Tinker SDK imports
 try:
@@ -87,7 +27,7 @@ try:
     TINKER_AVAILABLE = True
 except ImportError:
     TINKER_AVAILABLE = False
-    print("Warning: tinker SDK not installed. Running in mock mode.")
+    print("⚠ Warning: tinker SDK not installed. Running in mock mode.")
 
 
 # ============================================================================
@@ -166,67 +106,83 @@ class ErrorResponse(BaseModel):
 
 
 # ============================================================================
-# Global client instance
+# Client Manager - Thread-safe client caching per API key
 # ============================================================================
 
-service_client = None
-rest_client = None
+class TinkerClientManager:
+    """
+    Manages Tinker SDK clients, caching them per API key.
+    This avoids re-initializing the SDK for every request while still
+    supporting multiple API keys (useful for testing).
+    """
+    
+    def __init__(self):
+        self._clients: Dict[str, tuple] = {}  # api_key -> (service_client, rest_client)
+        self._lock = threading.Lock()
+    
+    def get_client(self, api_key: str):
+        """Get or create a Tinker client for the given API key."""
+        if not api_key:
+            return None, None
+        
+        with self._lock:
+            if api_key in self._clients:
+                return self._clients[api_key]
+            
+            # Create new client
+            try:
+                # Set the API key in environment for Tinker SDK
+                old_key = os.environ.get("TINKER_API_KEY")
+                os.environ["TINKER_API_KEY"] = api_key
+                
+                service_client = tinker.ServiceClient()
+                rest_client = service_client.create_rest_client()
+                
+                # Restore old key if any
+                if old_key:
+                    os.environ["TINKER_API_KEY"] = old_key
+                else:
+                    del os.environ["TINKER_API_KEY"]
+                
+                self._clients[api_key] = (service_client, rest_client)
+                return service_client, rest_client
+            except Exception as e:
+                print(f"✗ Failed to create Tinker client: {e}")
+                return None, None
+    
+    def clear(self):
+        """Clear all cached clients."""
+        with self._lock:
+            self._clients.clear()
 
+
+# Global client manager
+client_manager = TinkerClientManager()
+
+
+# ============================================================================
+# FastAPI App Setup
+# ============================================================================
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Initialize Tinker client on startup."""
-    global service_client, rest_client
-    
+    """App lifespan - minimal startup, clients created on-demand."""
     if TINKER_AVAILABLE:
-        api_key = os.environ.get("TINKER_API_KEY")
-        
-        # Try to get from keyring if not in env
-        if not api_key:
-            import platform
-            current_platform = platform.system()
-            
-            # On Windows, use direct Windows Credential Manager access
-            # (Go's go-keyring stores credentials with TargetName="{service}:{username}")
-            if current_platform == "Windows":
-                api_key = get_api_key_from_windows_credential_manager()
-                if api_key:
-                    print("✓ API key retrieved from Windows Credential Manager")
-                    os.environ["TINKER_API_KEY"] = api_key
-            
-            # On macOS/Linux, Python keyring is compatible with Go's go-keyring
-            if not api_key and keyring:
-                try:
-                    api_key = keyring.get_password("tinker-cli", "api-key")
-                    if api_key:
-                        print("✓ API key retrieved from system keyring")
-                        os.environ["TINKER_API_KEY"] = api_key
-                except Exception as e:
-                    print(f"⚠ Failed to retrieve API key from keyring: {e}")
-
-        if api_key:
-            try:
-                service_client = tinker.ServiceClient()
-                rest_client = service_client.create_rest_client()
-                print("✓ Tinker SDK initialized successfully")
-            except Exception as e:
-                print(f"✗ Failed to initialize Tinker SDK: {e}")
-        else:
-            print("✗ TINKER_API_KEY not set (checked environment and keyring)")
+        print("✓ Tinker SDK available")
+        print("ℹ Clients will be created on-demand from Authorization header")
     else:
         print("⚠ Running in mock mode (tinker SDK not installed)")
     
     yield
     
     # Cleanup
-    service_client = None
-    rest_client = None
+    client_manager.clear()
 
 
 app = FastAPI(
     title="Tinker Bridge API",
     description="REST API bridge for Tinker Python SDK",
-    version="1.0.0",
+    version="2.0.0",
     lifespan=lifespan
 )
 
@@ -241,22 +197,60 @@ app.add_middleware(
 
 
 # ============================================================================
-# Helper functions
+# Dependency Injection - API Key and Client
 # ============================================================================
 
-def check_client():
-    """Check if Tinker client is available."""
+def extract_api_key(request: Request) -> Optional[str]:
+    """
+    Extract API key from Authorization header.
+    
+    The Go CLI sends: Authorization: Bearer <api_key>
+    This eliminates the need for the bridge to access the keyring,
+    preventing the second password prompt on macOS.
+    """
+    auth_header = request.headers.get("Authorization", "")
+    
+    if auth_header.startswith("Bearer "):
+        return auth_header[7:]  # Remove "Bearer " prefix
+    
+    # Fallback to environment variable (for standalone bridge usage)
+    return os.environ.get("TINKER_API_KEY")
+
+
+def get_rest_client(request: Request):
+    """
+    Dependency that provides a Tinker REST client.
+    Creates/retrieves client based on API key from Authorization header.
+    """
     if not TINKER_AVAILABLE:
         raise HTTPException(
             status_code=503,
             detail="Tinker SDK not installed. Please install with: pip install tinker"
         )
+    
+    api_key = extract_api_key(request)
+    
+    if not api_key:
+        raise HTTPException(
+            status_code=401,
+            detail="API key required. The Go CLI should pass it via Authorization header, "
+                   "or set TINKER_API_KEY environment variable for standalone usage."
+        )
+    
+    _, rest_client = client_manager.get_client(api_key)
+    
     if rest_client is None:
         raise HTTPException(
             status_code=503,
-            detail="Tinker client not initialized. Check TINKER_API_KEY environment variable."
+            detail="Failed to initialize Tinker client. Please check your API key."
         )
+    
+    return rest_client
 
+
+# ============================================================================
+# Helper functions
+# ============================================================================
 
 def convert_training_run(tr) -> TrainingRun:
     """Convert Tinker SDK training run to our model."""
@@ -298,23 +292,31 @@ def convert_checkpoint(cp, training_run_id: str = "") -> Checkpoint:
 # ============================================================================
 
 @app.get("/health")
-async def health_check():
+async def health_check(request: Request):
     """Health check endpoint."""
+    api_key = extract_api_key(request)
+    has_key = bool(api_key)
+    
+    client_ready = False
+    if has_key and TINKER_AVAILABLE:
+        _, rest_client = client_manager.get_client(api_key)
+        client_ready = rest_client is not None
+    
     return {
         "status": "healthy",
         "tinker_sdk": TINKER_AVAILABLE,
-        "client_initialized": rest_client is not None
+        "api_key_provided": has_key,
+        "client_ready": client_ready
     }
 
 
 @app.get("/training_runs", response_model=TrainingRunsResponse)
 async def list_training_runs(
+    rest_client=Depends(get_rest_client),
     limit: int = Query(default=20, ge=1, le=100),
     offset: int = Query(default=0, ge=0)
 ):
     """List all training runs with pagination."""
-    check_client()
-    
     try:
         future = rest_client.list_training_runs(limit=limit, offset=offset)
         response = future.result()
@@ -333,10 +335,8 @@ async def list_training_runs(
 
 
 @app.get("/training_runs/{run_id}", response_model=TrainingRun)
-async def get_training_run(run_id: str):
+async def get_training_run(run_id: str, rest_client=Depends(get_rest_client)):
     """Get details of a specific training run."""
-    check_client()
-    
     try:
         future = rest_client.get_training_run(run_id)
         tr = future.result()
@@ -348,10 +348,8 @@ async def get_training_run(run_id: str):
 
 
 @app.get("/training_runs/{run_id}/checkpoints", response_model=CheckpointsResponse)
-async def list_checkpoints(run_id: str):
+async def list_checkpoints(run_id: str, rest_client=Depends(get_rest_client)):
     """List checkpoints for a specific training run."""
-    check_client()
-    
     try:
         future = rest_client.list_checkpoints(run_id)
         response = future.result()
@@ -366,10 +364,8 @@ async def list_checkpoints(run_id: str):
 
 
 @app.get("/users/checkpoints", response_model=UserCheckpointsResponse)
-async def list_user_checkpoints():
+async def list_user_checkpoints(rest_client=Depends(get_rest_client)):
     """List all checkpoints across all training runs."""
-    check_client()
-    
     try:
         future = rest_client.list_user_checkpoints()
         response = future.result()
@@ -382,71 +378,63 @@ async def list_user_checkpoints():
 
 
 @app.post("/checkpoints/publish", response_model=CheckpointActionResponse)
-async def publish_checkpoint(request: CheckpointActionRequest):
+async def publish_checkpoint(request_body: CheckpointActionRequest, rest_client=Depends(get_rest_client)):
     """Publish a checkpoint to make it public."""
-    check_client()
-    
     try:
-        future = rest_client.publish_checkpoint_from_tinker_path(request.tinker_path)
+        future = rest_client.publish_checkpoint_from_tinker_path(request_body.tinker_path)
         future.result()
         
         return CheckpointActionResponse(
-            message=f"Checkpoint published successfully: {request.tinker_path}",
+            message=f"Checkpoint published successfully: {request_body.tinker_path}",
             success=True
         )
     except Exception as e:
         if "not found" in str(e).lower():
-            raise HTTPException(status_code=404, detail=f"Checkpoint not found: {request.tinker_path}")
+            raise HTTPException(status_code=404, detail=f"Checkpoint not found: {request_body.tinker_path}")
         if "already public" in str(e).lower() or "409" in str(e):
-            raise HTTPException(status_code=409, detail=f"Checkpoint is already public: {request.tinker_path}")
+            raise HTTPException(status_code=409, detail=f"Checkpoint is already public: {request_body.tinker_path}")
         raise HTTPException(status_code=500, detail=f"Failed to publish checkpoint: {str(e)}")
 
 
 @app.post("/checkpoints/unpublish", response_model=CheckpointActionResponse)
-async def unpublish_checkpoint(request: CheckpointActionRequest):
+async def unpublish_checkpoint(request_body: CheckpointActionRequest, rest_client=Depends(get_rest_client)):
     """Unpublish a checkpoint to make it private."""
-    check_client()
-    
     try:
-        future = rest_client.unpublish_checkpoint_from_tinker_path(request.tinker_path)
+        future = rest_client.unpublish_checkpoint_from_tinker_path(request_body.tinker_path)
         future.result()
         
         return CheckpointActionResponse(
-            message=f"Checkpoint unpublished successfully: {request.tinker_path}",
+            message=f"Checkpoint unpublished successfully: {request_body.tinker_path}",
             success=True
         )
     except Exception as e:
         if "not found" in str(e).lower():
-            raise HTTPException(status_code=404, detail=f"Checkpoint not found: {request.tinker_path}")
+            raise HTTPException(status_code=404, detail=f"Checkpoint not found: {request_body.tinker_path}")
         if "already private" in str(e).lower() or "409" in str(e):
-            raise HTTPException(status_code=409, detail=f"Checkpoint is already private: {request.tinker_path}")
+            raise HTTPException(status_code=409, detail=f"Checkpoint is already private: {request_body.tinker_path}")
         raise HTTPException(status_code=500, detail=f"Failed to unpublish checkpoint: {str(e)}")
 
 
 @app.post("/checkpoints/delete", response_model=CheckpointActionResponse)
-async def delete_checkpoint_by_path(request: CheckpointActionRequest):
+async def delete_checkpoint_by_path(request_body: CheckpointActionRequest, rest_client=Depends(get_rest_client)):
     """Delete a checkpoint using its tinker path."""
-    check_client()
-    
     try:
-        future = rest_client.delete_checkpoint_from_tinker_path(request.tinker_path)
+        future = rest_client.delete_checkpoint_from_tinker_path(request_body.tinker_path)
         future.result()
         
         return CheckpointActionResponse(
-            message=f"Checkpoint deleted successfully: {request.tinker_path}",
+            message=f"Checkpoint deleted successfully: {request_body.tinker_path}",
             success=True
         )
     except Exception as e:
         if "not found" in str(e).lower():
-            raise HTTPException(status_code=404, detail=f"Checkpoint not found: {request.tinker_path}")
+            raise HTTPException(status_code=404, detail=f"Checkpoint not found: {request_body.tinker_path}")
         raise HTTPException(status_code=500, detail=f"Failed to delete checkpoint: {str(e)}")
 
 
 @app.delete("/checkpoints/{training_run_id}/{checkpoint_id}")
-async def delete_checkpoint(training_run_id: str, checkpoint_id: str):
+async def delete_checkpoint(training_run_id: str, checkpoint_id: str, rest_client=Depends(get_rest_client)):
     """Delete a checkpoint by training run ID and checkpoint ID."""
-    check_client()
-    
     try:
         future = rest_client.delete_checkpoint(training_run_id, checkpoint_id)
         future.result()
@@ -459,10 +447,8 @@ async def delete_checkpoint(training_run_id: str, checkpoint_id: str):
 
 
 @app.get("/users/usage", response_model=UsageStats)
-async def get_usage_stats():
+async def get_usage_stats(rest_client=Depends(get_rest_client)):
     """Get usage statistics for the user."""
-    check_client()
-    
     try:
         # Get training runs count
         tr_future = rest_client.list_training_runs(limit=1)
@@ -487,10 +473,8 @@ async def get_usage_stats():
 
 
 @app.get("/checkpoints/{training_run_id}/{checkpoint_id}/archive")
-async def get_checkpoint_archive_url(training_run_id: str, checkpoint_id: str):
+async def get_checkpoint_archive_url(training_run_id: str, checkpoint_id: str, rest_client=Depends(get_rest_client)):
     """Get download URL for a checkpoint archive."""
-    check_client()
-    
     try:
         future = rest_client.get_checkpoint_archive_url(training_run_id, checkpoint_id)
         response = future.result()
@@ -513,14 +497,19 @@ def main():
     host = os.environ.get("TINKER_BRIDGE_HOST", "127.0.0.1")
     
     print(f"""
-╔══════════════════════════════════════════════════════════════╗
-║                    Tinker Bridge Server                       ║
-╠══════════════════════════════════════════════════════════════╣
-║  Starting server at http://{host}:{port}                      
-║  API docs available at http://{host}:{port}/docs              
-║                                                               
-║  Make sure TINKER_API_KEY is set or saved in CLI settings!    
-╚══════════════════════════════════════════════════════════════╝
+╔══════════════════════════════════════════════════════════════════╗
+║                    Tinker Bridge Server v2.0                      ║
+╠══════════════════════════════════════════════════════════════════╣
+║  Starting server at http://{host}:{port:<5}                          ║
+║  API docs available at http://{host}:{port}/docs                  ║
+║                                                                   ║
+║  API Key Flow:                                                    ║
+║  • Go CLI reads key from keyring → sends via Authorization header ║
+║  • Bridge uses key from header → NO second keyring access         ║
+║  • This eliminates double password prompts on macOS!              ║
+║                                                                   ║
+║  For standalone usage: set TINKER_API_KEY environment variable    ║
+╚══════════════════════════════════════════════════════════════════╝
 """)
     
     uvicorn.run(app, host=host, port=port)
@@ -528,4 +517,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

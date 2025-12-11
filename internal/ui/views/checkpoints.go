@@ -6,7 +6,6 @@ import (
 	"time"
 
 	"github.com/charmbracelet/bubbles/spinner"
-	"github.com/charmbracelet/bubbles/table"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/mohadese/tinker-cli/internal/api"
@@ -72,57 +71,29 @@ func DeleteCheckpointCmd(client *api.Client, tinkerPath string) tea.Cmd {
 
 // CheckpointsModel represents the checkpoints view
 type CheckpointsModel struct {
-	table          table.Model
-	spinner        spinner.Model
-	styles         *ui.Styles
-	client         *api.Client
-	checkpoints    []api.Checkpoint
-	loading        bool
-	err            error
-	statusMsg      string
-	showConfirm    bool
-	confirmAction  string
-	confirmIndex   int
-	width          int
-	height         int
+	spinner       spinner.Model
+	styles        *ui.Styles
+	client        *api.Client
+	checkpoints   []api.Checkpoint
+	loading       bool
+	err           error
+	statusMsg     string
+	showConfirm   bool
+	confirmAction string
+	confirmIndex  int
+	cursor        int
+	scrollOffset  int
+	width         int
+	height        int
 }
 
 // NewCheckpointsModel creates a new checkpoints model
 func NewCheckpointsModel(styles *ui.Styles, client *api.Client) CheckpointsModel {
-	columns := []table.Column{
-		{Title: "Name", Width: 20},
-		{Title: "Type", Width: 12},
-		{Title: "Training Run", Width: 20},
-		{Title: "Published", Width: 10},
-		{Title: "Created", Width: 18},
-	}
-
-	t := table.New(
-		table.WithColumns(columns),
-		table.WithFocused(true),
-		table.WithHeight(10),
-	)
-
-	// Style the table
-	s := table.DefaultStyles()
-	s.Header = s.Header.
-		BorderStyle(lipgloss.NormalBorder()).
-		BorderForeground(ui.ColorTextMuted).
-		BorderBottom(true).
-		Bold(true).
-		Foreground(ui.ColorPrimary)
-	s.Selected = s.Selected.
-		Foreground(ui.ColorBgDark).
-		Background(ui.ColorPrimary).
-		Bold(true)
-	t.SetStyles(s)
-
 	sp := spinner.New()
 	sp.Spinner = spinner.Dot
 	sp.Style = lipgloss.NewStyle().Foreground(ui.ColorPrimary)
 
 	return CheckpointsModel{
-		table:   t,
 		spinner: sp,
 		styles:  styles,
 		client:  client,
@@ -146,7 +117,6 @@ func (m CheckpointsModel) Update(msg tea.Msg) (CheckpointsModel, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
-		m.table.SetHeight(msg.Height - 14)
 		return m, nil
 
 	case CheckpointsFetchedMsg:
@@ -156,16 +126,15 @@ func (m CheckpointsModel) Update(msg tea.Msg) (CheckpointsModel, tea.Cmd) {
 			return m, nil
 		}
 		m.checkpoints = msg.Checkpoints
-		m.updateTableRows()
 		return m, nil
 
 	case CheckpointActionMsg:
 		m.loading = false
 		m.showConfirm = false
 		if msg.Error != nil {
-			m.statusMsg = fmt.Sprintf("Error: %s", msg.Error)
+			m.statusMsg = fmt.Sprintf("error: %s", msg.Error)
 		} else {
-			m.statusMsg = fmt.Sprintf("Successfully %sed checkpoint", msg.Action)
+			m.statusMsg = fmt.Sprintf("%sed", msg.Action)
 			// Refresh the list
 			m.loading = true
 			return m, tea.Batch(
@@ -190,12 +159,12 @@ func (m CheckpointsModel) Update(msg tea.Msg) (CheckpointsModel, tea.Cmd) {
 				m.loading = true
 				if m.confirmIndex >= 0 && m.confirmIndex < len(m.checkpoints) {
 					cp := m.checkpoints[m.confirmIndex]
-				switch m.confirmAction {
-				case "delete":
-					return m, tea.Batch(
-						m.spinner.Tick,
-						DeleteCheckpointCmd(m.client, cp.TinkerPath),
-					)
+					switch m.confirmAction {
+					case "delete":
+						return m, tea.Batch(
+							m.spinner.Tick,
+							DeleteCheckpointCmd(m.client, cp.TinkerPath),
+						)
 					case "publish":
 						return m, tea.Batch(
 							m.spinner.Tick,
@@ -216,6 +185,16 @@ func (m CheckpointsModel) Update(msg tea.Msg) (CheckpointsModel, tea.Cmd) {
 		}
 
 		switch msg.String() {
+		case "up", "k":
+			if m.cursor > 0 {
+				m.cursor--
+				m.ensureVisible()
+			}
+		case "down", "j":
+			if m.cursor < len(m.checkpoints)-1 {
+				m.cursor++
+				m.ensureVisible()
+			}
 		case "r":
 			// Refresh
 			m.loading = true
@@ -227,17 +206,17 @@ func (m CheckpointsModel) Update(msg tea.Msg) (CheckpointsModel, tea.Cmd) {
 			)
 		case "d":
 			// Delete checkpoint
-			if idx := m.table.Cursor(); idx >= 0 && idx < len(m.checkpoints) {
+			if m.cursor >= 0 && m.cursor < len(m.checkpoints) {
 				m.showConfirm = true
 				m.confirmAction = "delete"
-				m.confirmIndex = idx
+				m.confirmIndex = m.cursor
 			}
 		case "p":
 			// Publish/Unpublish toggle
-			if idx := m.table.Cursor(); idx >= 0 && idx < len(m.checkpoints) {
-				cp := m.checkpoints[idx]
+			if m.cursor >= 0 && m.cursor < len(m.checkpoints) {
+				cp := m.checkpoints[m.cursor]
 				m.showConfirm = true
-				m.confirmIndex = idx
+				m.confirmIndex = m.cursor
 				if cp.IsPublished {
 					m.confirmAction = "unpublish"
 				} else {
@@ -247,11 +226,22 @@ func (m CheckpointsModel) Update(msg tea.Msg) (CheckpointsModel, tea.Cmd) {
 		}
 	}
 
-	var cmd tea.Cmd
-	m.table, cmd = m.table.Update(msg)
-	cmds = append(cmds, cmd)
-
 	return m, tea.Batch(cmds...)
+}
+
+// ensureVisible adjusts scroll offset to keep cursor visible
+func (m *CheckpointsModel) ensureVisible() {
+	visibleLines := m.height - 12
+	if visibleLines < 5 {
+		visibleLines = 5
+	}
+
+	if m.cursor < m.scrollOffset {
+		m.scrollOffset = m.cursor
+	}
+	if m.cursor >= m.scrollOffset+visibleLines {
+		m.scrollOffset = m.cursor - visibleLines + 1
+	}
 }
 
 // View renders the checkpoints view
@@ -259,30 +249,27 @@ func (m CheckpointsModel) View() string {
 	var b strings.Builder
 
 	// Title
-	title := m.styles.Title.Render("💾 Checkpoints")
+	title := m.styles.Title.Render("checkpoints")
 	b.WriteString(title)
+	b.WriteString("\n")
+
+	// Stats
+	stats := m.styles.Description.Render(fmt.Sprintf("%d total", len(m.checkpoints)))
+	b.WriteString(stats)
 	b.WriteString("\n\n")
 
 	if m.loading {
-		b.WriteString(fmt.Sprintf("%s Loading checkpoints...\n", m.spinner.View()))
+		b.WriteString(fmt.Sprintf("%s loading...\n", m.spinner.View()))
 	} else if m.err != nil {
-		errBox := m.styles.ErrorBox.Render(fmt.Sprintf("Error: %s", m.err))
-		b.WriteString(errBox)
+		b.WriteString(m.styles.ErrorBox.Render(fmt.Sprintf("error: %s", m.err)))
 	} else {
-		// Stats
-		stats := m.styles.Description.Render(
-			fmt.Sprintf("Total: %d checkpoints", len(m.checkpoints)),
-		)
-		b.WriteString(stats)
-		b.WriteString("\n\n")
-
-		// Table
-		b.WriteString(m.table.View())
+		// Render list
+		b.WriteString(m.renderList())
 
 		// Status message
 		if m.statusMsg != "" {
 			b.WriteString("\n")
-			if strings.HasPrefix(m.statusMsg, "Error") {
+			if strings.HasPrefix(m.statusMsg, "error") {
 				b.WriteString(m.styles.ErrorBox.Render(m.statusMsg))
 			} else {
 				b.WriteString(m.styles.SuccessBox.Render(m.statusMsg))
@@ -292,11 +279,7 @@ func (m CheckpointsModel) View() string {
 		// Confirmation dialog
 		if m.showConfirm && m.confirmIndex >= 0 && m.confirmIndex < len(m.checkpoints) {
 			cp := m.checkpoints[m.confirmIndex]
-			confirmMsg := fmt.Sprintf(
-				"Are you sure you want to %s checkpoint '%s'? (y/n)",
-				m.confirmAction,
-				cp.Name,
-			)
+			confirmMsg := fmt.Sprintf("%s '%s'? y/n", m.confirmAction, cp.Name)
 			b.WriteString("\n")
 			b.WriteString(m.styles.WarningBox.Render(confirmMsg))
 		}
@@ -305,53 +288,92 @@ func (m CheckpointsModel) View() string {
 	// Help
 	b.WriteString("\n\n")
 	help := m.styles.RenderHelp(
-		"↑/↓", "navigate",
+		"↑↓", "move",
 		"r", "refresh",
-		"p", "publish/unpublish",
+		"p", "publish",
 		"d", "delete",
 		"esc", "back",
-		"q", "quit",
 	)
 	b.WriteString(m.styles.Help.Render(help))
 
 	return m.styles.App.Render(b.String())
 }
 
-// updateTableRows updates the table rows from the checkpoints data
-func (m *CheckpointsModel) updateTableRows() {
-	rows := make([]table.Row, len(m.checkpoints))
-	for i, cp := range m.checkpoints {
-		published := "No"
-		if cp.IsPublished {
-			published = "Yes"
-		}
+// renderList renders the checkpoints list
+func (m CheckpointsModel) renderList() string {
+	var b strings.Builder
 
-		created := cp.CreatedAt.Format(time.RFC3339)
-		if !cp.CreatedAt.IsZero() {
-			created = cp.CreatedAt.Format("2006-01-02 15:04")
-		}
-
-		cpType := cp.Type
-		if cpType == "" {
-			cpType = "unknown"
-		}
-
-		rows[i] = table.Row{
-			truncate(cp.Name, 20),
-			cpType,
-			truncate(cp.TrainingRunID, 20),
-			published,
-			created,
-		}
+	if len(m.checkpoints) == 0 {
+		b.WriteString(m.styles.Description.Render("no checkpoints"))
+		return b.String()
 	}
-	m.table.SetRows(rows)
+
+	// Calculate visible range
+	visibleLines := m.height - 12
+	if visibleLines < 5 {
+		visibleLines = 5
+	}
+
+	startIdx := m.scrollOffset
+	endIdx := m.scrollOffset + visibleLines
+	if endIdx > len(m.checkpoints) {
+		endIdx = len(m.checkpoints)
+	}
+
+	for idx := startIdx; idx < endIdx; idx++ {
+		cp := m.checkpoints[idx]
+		isSelected := idx == m.cursor
+
+		// Cursor
+		cursor := "  "
+		if isSelected {
+			cursor = lipgloss.NewStyle().Foreground(ui.ColorPrimary).Render("› ")
+		}
+
+		// Published indicator
+		published := "·"
+		if cp.IsPublished {
+			published = "●"
+		}
+
+		// Format time
+		created := "–"
+		if !cp.CreatedAt.IsZero() {
+			created = cp.CreatedAt.Format(time.DateOnly)
+		}
+
+		row := fmt.Sprintf("%-20s %s %-12s %s",
+			truncate(cp.Name, 20),
+			published,
+			truncate(cp.Type, 12),
+			created,
+		)
+
+		if isSelected {
+			b.WriteString(cursor + lipgloss.NewStyle().
+				Foreground(ui.ColorPrimary).
+				Render(row))
+		} else {
+			b.WriteString(cursor + lipgloss.NewStyle().
+				Foreground(ui.ColorTextNormal).
+				Render(row))
+		}
+		b.WriteString("\n")
+	}
+
+	// Scroll indicator
+	if len(m.checkpoints) > visibleLines {
+		scrollInfo := fmt.Sprintf("%d-%d of %d", startIdx+1, endIdx, len(m.checkpoints))
+		b.WriteString(m.styles.Description.Render(scrollInfo))
+	}
+
+	return b.String()
 }
 
 // SelectedCheckpoint returns the currently selected checkpoint
 func (m CheckpointsModel) SelectedCheckpoint() *api.Checkpoint {
-	if idx := m.table.Cursor(); idx >= 0 && idx < len(m.checkpoints) {
-		return &m.checkpoints[idx]
+	if m.cursor >= 0 && m.cursor < len(m.checkpoints) {
+		return &m.checkpoints[m.cursor]
 	}
 	return nil
 }
-

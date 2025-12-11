@@ -39,7 +39,7 @@ func FetchRunsCmd(client *api.Client) tea.Cmd {
 	return func() tea.Msg {
 		// First check if bridge is running
 		if err := client.CheckBridgeHealth(); err != nil {
-			return RunsFetchedMsg{Error: fmt.Errorf("Bridge server not available.\n\nTo start the bridge:\n  cd bridge && pip install -r requirements.txt\n  python server.py\n\nOriginal error: %w", err)}
+			return RunsFetchedMsg{Error: fmt.Errorf("bridge not available: %w", err)}
 		}
 
 		resp, err := client.ListTrainingRuns(50, 0)
@@ -99,35 +99,35 @@ func DeleteCheckpointInRunCmd(client *api.Client, tinkerPath, runID string) tea.
 
 // TreeItem represents an item in the tree view (either a run or checkpoint)
 type TreeItem struct {
-	IsRun      bool
-	RunIndex   int   // Index into runs slice
-	CpIndex    int   // Index into run's checkpoints slice (-1 if this is a run)
-	Depth      int   // 0 for runs, 1 for checkpoints
+	IsRun    bool
+	RunIndex int // Index into runs slice
+	CpIndex  int // Index into run's checkpoints slice (-1 if this is a run)
+	Depth    int // 0 for runs, 1 for checkpoints
 }
 
 // RunsModel represents the training runs view with nested checkpoints
 type RunsModel struct {
-	spinner        spinner.Model
-	styles         *ui.Styles
-	client         *api.Client
-	runs           []api.TrainingRun
-	expandedRuns   map[string]bool     // Track which runs are expanded
-	loadingRuns    map[string]bool     // Track which runs are loading checkpoints
-	loading        bool
-	err            error
-	statusMsg      string
-	showConfirm    bool
-	confirmAction  string
-	confirmRunIdx  int
-	confirmCpIdx   int
-	width          int
-	height         int
-	totalRuns      int
-	
+	spinner       spinner.Model
+	styles        *ui.Styles
+	client        *api.Client
+	runs          []api.TrainingRun
+	expandedRuns  map[string]bool // Track which runs are expanded
+	loadingRuns   map[string]bool // Track which runs are loading checkpoints
+	loading       bool
+	err           error
+	statusMsg     string
+	showConfirm   bool
+	confirmAction string
+	confirmRunIdx int
+	confirmCpIdx  int
+	width         int
+	height        int
+	totalRuns     int
+
 	// Tree navigation
-	treeItems      []TreeItem  // Flattened tree items for navigation
-	cursor         int         // Current cursor position in treeItems
-	scrollOffset   int         // Scroll offset for viewing
+	treeItems    []TreeItem // Flattened tree items for navigation
+	cursor       int        // Current cursor position in treeItems
+	scrollOffset int        // Scroll offset for viewing
 }
 
 // NewRunsModel creates a new training runs model
@@ -178,7 +178,7 @@ func (m RunsModel) Update(msg tea.Msg) (RunsModel, tea.Cmd) {
 	case CheckpointsForRunFetchedMsg:
 		delete(m.loadingRuns, msg.RunID)
 		if msg.Error != nil {
-			m.statusMsg = fmt.Sprintf("Error loading checkpoints: %s", msg.Error)
+			m.statusMsg = fmt.Sprintf("error: %s", msg.Error)
 			return m, nil
 		}
 		// Find the run and update its checkpoints
@@ -195,9 +195,9 @@ func (m RunsModel) Update(msg tea.Msg) (RunsModel, tea.Cmd) {
 		m.loading = false
 		m.showConfirm = false
 		if msg.Error != nil {
-			m.statusMsg = fmt.Sprintf("Error: %s", msg.Error)
+			m.statusMsg = fmt.Sprintf("error: %s", msg.Error)
 		} else {
-			m.statusMsg = fmt.Sprintf("Successfully %sed checkpoint", msg.Action)
+			m.statusMsg = fmt.Sprintf("%sed", msg.Action)
 			// Refresh the checkpoints for this run
 			m.loadingRuns[msg.RunID] = true
 			return m, tea.Batch(
@@ -337,7 +337,7 @@ func (m *RunsModel) rebuildTreeItems() {
 			CpIndex:  -1,
 			Depth:    0,
 		})
-		
+
 		// If expanded, add checkpoint items
 		if m.expandedRuns[run.ID] {
 			for cpIdx := range run.Checkpoints {
@@ -350,7 +350,7 @@ func (m *RunsModel) rebuildTreeItems() {
 			}
 		}
 	}
-	
+
 	// Ensure cursor is in bounds
 	if m.cursor >= len(m.treeItems) {
 		m.cursor = len(m.treeItems) - 1
@@ -362,15 +362,15 @@ func (m *RunsModel) rebuildTreeItems() {
 
 // ensureVisible adjusts scroll offset to keep cursor visible
 func (m *RunsModel) ensureVisible() {
-	visibleLines := m.height - 16 // Account for header, footer, etc.
+	visibleLines := m.height - 14
 	if visibleLines < 5 {
 		visibleLines = 5
 	}
-	
+
 	if m.cursor < m.scrollOffset {
 		m.scrollOffset = m.cursor
 	}
-	if m.cursor >= m.scrollOffset + visibleLines {
+	if m.cursor >= m.scrollOffset+visibleLines {
 		m.scrollOffset = m.cursor - visibleLines + 1
 	}
 }
@@ -380,30 +380,27 @@ func (m RunsModel) View() string {
 	var b strings.Builder
 
 	// Title
-	title := m.styles.Title.Render("🚀 Training Runs")
+	title := m.styles.Title.Render("training runs")
 	b.WriteString(title)
+	b.WriteString("\n")
+
+	// Stats
+	stats := m.styles.Description.Render(fmt.Sprintf("%d total", m.totalRuns))
+	b.WriteString(stats)
 	b.WriteString("\n\n")
 
 	if m.loading && len(m.runs) == 0 {
-		b.WriteString(fmt.Sprintf("%s Loading training runs...\n", m.spinner.View()))
+		b.WriteString(fmt.Sprintf("%s loading...\n", m.spinner.View()))
 	} else if m.err != nil {
-		errBox := m.styles.ErrorBox.Render(fmt.Sprintf("Error: %s", m.err))
-		b.WriteString(errBox)
+		b.WriteString(m.styles.ErrorBox.Render(fmt.Sprintf("error: %s", m.err)))
 	} else {
-		// Stats
-		stats := m.styles.Description.Render(
-			fmt.Sprintf("Total: %d runs • Press Enter/Space to expand/collapse", m.totalRuns),
-		)
-		b.WriteString(stats)
-		b.WriteString("\n\n")
-
 		// Render tree view
 		b.WriteString(m.renderTreeView())
 
 		// Status message
 		if m.statusMsg != "" {
 			b.WriteString("\n")
-			if strings.HasPrefix(m.statusMsg, "Error") {
+			if strings.HasPrefix(m.statusMsg, "error") {
 				b.WriteString(m.styles.ErrorBox.Render(m.statusMsg))
 			} else {
 				b.WriteString(m.styles.SuccessBox.Render(m.statusMsg))
@@ -415,11 +412,7 @@ func (m RunsModel) View() string {
 			run := m.runs[m.confirmRunIdx]
 			if m.confirmCpIdx >= 0 && m.confirmCpIdx < len(run.Checkpoints) {
 				cp := run.Checkpoints[m.confirmCpIdx]
-				confirmMsg := fmt.Sprintf(
-					"Are you sure you want to %s checkpoint '%s'? (y/n)",
-					m.confirmAction,
-					cp.Name,
-				)
+				confirmMsg := fmt.Sprintf("%s '%s'? y/n", m.confirmAction, cp.Name)
 				b.WriteString("\n")
 				b.WriteString(m.styles.WarningBox.Render(confirmMsg))
 			}
@@ -429,10 +422,10 @@ func (m RunsModel) View() string {
 	// Help
 	b.WriteString("\n\n")
 	help := m.styles.RenderHelp(
-		"↑/↓", "navigate",
-		"enter/space", "expand/collapse",
+		"↑↓", "move",
+		"enter", "expand",
 		"r", "refresh",
-		"p", "publish/unpublish",
+		"p", "publish",
 		"d", "delete",
 		"esc", "back",
 	)
@@ -444,41 +437,28 @@ func (m RunsModel) View() string {
 // renderTreeView renders the tree view of runs and checkpoints
 func (m RunsModel) renderTreeView() string {
 	var b strings.Builder
-	
+
 	// Calculate visible range
-	visibleLines := m.height - 16
+	visibleLines := m.height - 14
 	if visibleLines < 5 {
 		visibleLines = 5
 	}
-	
+
 	startIdx := m.scrollOffset
 	endIdx := m.scrollOffset + visibleLines
 	if endIdx > len(m.treeItems) {
 		endIdx = len(m.treeItems)
 	}
 
-	// Header
-	headerStyle := lipgloss.NewStyle().
-		Foreground(ui.ColorPrimary).
-		Bold(true).
-		BorderStyle(lipgloss.NormalBorder()).
-		BorderBottom(true).
-		BorderForeground(ui.ColorTextMuted).
-		Width(m.width - 6)
-	
-	header := fmt.Sprintf("  %-24s %-25s %-10s %-12s %-18s", "ID/Name", "Base Model/Type", "LoRA/Pub", "Status", "Created")
-	b.WriteString(headerStyle.Render(header))
-	b.WriteString("\n")
-
 	if len(m.treeItems) == 0 {
-		b.WriteString(m.styles.Description.Render("  No training runs found"))
+		b.WriteString(m.styles.Description.Render("no runs found"))
 		return b.String()
 	}
 
 	for idx := startIdx; idx < endIdx; idx++ {
 		item := m.treeItems[idx]
 		isSelected := idx == m.cursor
-		
+
 		if item.IsRun {
 			b.WriteString(m.renderRunRow(item.RunIndex, isSelected))
 		} else {
@@ -489,7 +469,7 @@ func (m RunsModel) renderTreeView() string {
 
 	// Scroll indicator
 	if len(m.treeItems) > visibleLines {
-		scrollInfo := fmt.Sprintf("  Showing %d-%d of %d items", startIdx+1, endIdx, len(m.treeItems))
+		scrollInfo := fmt.Sprintf("%d-%d of %d", startIdx+1, endIdx, len(m.treeItems))
 		b.WriteString(m.styles.Description.Render(scrollInfo))
 	}
 
@@ -501,62 +481,53 @@ func (m RunsModel) renderRunRow(runIdx int, isSelected bool) string {
 	if runIdx >= len(m.runs) {
 		return ""
 	}
-	
+
 	run := m.runs[runIdx]
-	
+
 	// Expand/collapse indicator
-	expandIcon := "▶"
+	expandIcon := "▸"
 	if m.expandedRuns[run.ID] {
-		expandIcon = "▼"
+		expandIcon = "▾"
 	}
-	
+
 	// Loading indicator
 	if m.loadingRuns[run.ID] {
 		expandIcon = m.spinner.View()
 	}
 
-	loraStr := "No"
-	if run.IsLoRA {
-		loraStr = "Yes"
-		if run.LoRAConfig != nil {
-			loraStr = fmt.Sprintf("r%d", run.LoRAConfig.Rank)
-		}
-	}
-
-	created := formatTime(run.CreatedAt)
+	// Format status
 	status := run.Status
 	if status == "" {
-		status = "unknown"
+		status = "–"
 	}
 
-	// Format checkpoint count
-	cpCount := len(run.Checkpoints)
-	cpInfo := ""
-	if m.expandedRuns[run.ID] && cpCount > 0 {
-		cpInfo = fmt.Sprintf(" (%d)", cpCount)
+	// Format model name (truncate)
+	model := truncate(run.BaseModel, 20)
+
+	created := formatTime(run.CreatedAt)
+
+	// Cursor
+	cursor := "  "
+	if isSelected {
+		cursor = lipgloss.NewStyle().Foreground(ui.ColorPrimary).Render("› ")
 	}
 
-	row := fmt.Sprintf("%s %-22s %-25s %-10s %-12s %-18s",
+	row := fmt.Sprintf("%s %s %-22s %-20s %s",
 		expandIcon,
-		truncate(run.ID, 22)+cpInfo,
-		truncate(run.BaseModel, 25),
-		loraStr,
+		truncate(run.ID, 12),
+		model,
 		status,
 		created,
 	)
 
 	if isSelected {
-		return lipgloss.NewStyle().
-			Foreground(ui.ColorBgDark).
-			Background(ui.ColorPrimary).
-			Bold(true).
-			Width(m.width - 6).
+		return cursor + lipgloss.NewStyle().
+			Foreground(ui.ColorPrimary).
 			Render(row)
 	}
 
-	return lipgloss.NewStyle().
+	return cursor + lipgloss.NewStyle().
 		Foreground(ui.ColorTextNormal).
-		Width(m.width - 6).
 		Render(row)
 }
 
@@ -571,47 +542,42 @@ func (m RunsModel) renderCheckpointRow(runIdx, cpIdx int, isSelected bool) strin
 	}
 	cp := run.Checkpoints[cpIdx]
 
-	published := "No"
+	published := "·"
 	if cp.IsPublished {
-		published = "Yes"
+		published = "●"
 	}
 
 	created := formatTime(cp.CreatedAt)
-	cpType := cp.Type
-	if cpType == "" {
-		cpType = "unknown"
+
+	// Cursor
+	cursor := "  "
+	if isSelected {
+		cursor = lipgloss.NewStyle().Foreground(ui.ColorAccent).Render("› ")
 	}
 
-	// Indent checkpoints with tree branch indicator
-	row := fmt.Sprintf("    └─ %-18s %-25s %-10s %-12s %-18s",
+	row := fmt.Sprintf("    └ %-18s %s %s",
 		truncate(cp.Name, 18),
-		cpType,
 		published,
-		"checkpoint",
 		created,
 	)
 
 	if isSelected {
-		return lipgloss.NewStyle().
-			Foreground(ui.ColorBgDark).
-			Background(ui.ColorSecondary).
-			Bold(true).
-			Width(m.width - 6).
+		return cursor + lipgloss.NewStyle().
+			Foreground(ui.ColorAccent).
 			Render(row)
 	}
 
-	return lipgloss.NewStyle().
+	return cursor + lipgloss.NewStyle().
 		Foreground(ui.ColorTextDim).
-		Width(m.width - 6).
 		Render(row)
 }
 
 // formatTime formats a time value
 func formatTime(t time.Time) string {
 	if t.IsZero() {
-		return "N/A"
+		return "–"
 	}
-	return t.Format("2006-01-02 15:04")
+	return t.Format("Jan 02 15:04")
 }
 
 // SelectedRun returns the currently selected run
@@ -647,5 +613,5 @@ func truncate(s string, maxLen int) string {
 	if maxLen <= 3 {
 		return s[:maxLen]
 	}
-	return s[:maxLen-3] + "..."
+	return s[:maxLen-2] + "…"
 }

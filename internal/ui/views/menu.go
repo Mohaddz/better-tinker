@@ -56,43 +56,36 @@ func NewMenuModel(styles *ui.Styles, connected bool) MenuModel {
 	items := []list.Item{
 		MenuItem{
 			title:       "Training Runs",
-			description: "View runs with checkpoints grouped under each run",
-			icon:        "🚀",
+			description: "View runs with checkpoints",
+			icon:        "→",
 			view:        ViewRuns,
 		},
 		MenuItem{
 			title:       "All Checkpoints",
-			description: "Browse all checkpoints in a flat list",
-			icon:        "💾",
+			description: "Browse checkpoints",
+			icon:        "→",
 			view:        ViewCheckpoints,
 		},
 		MenuItem{
-			title:       "Usage Statistics",
-			description: "View your API usage and quotas",
-			icon:        "📊",
+			title:       "Usage",
+			description: "API usage and quotas",
+			icon:        "→",
 			view:        ViewUsage,
 		},
 		MenuItem{
-			title:       "Sampler",
-			description: "Interactive model sampling",
-			icon:        "✨",
-			view:        ViewSampler,
-		},
-		MenuItem{
 			title:       "Settings",
-			description: "Configure API key and preferences",
-			icon:        "⚙️",
+			description: "Configure preferences",
+			icon:        "→",
 			view:        ViewSettings,
 		},
 	}
 
 	delegate := newMenuDelegate(styles)
 	l := list.New(items, delegate, 0, 0)
-	l.Title = "Tinker CLI"
 	l.SetShowStatusBar(false)
 	l.SetFilteringEnabled(false)
 	l.SetShowHelp(false)
-	l.Styles.Title = styles.Title
+	l.SetShowTitle(false)
 
 	return MenuModel{
 		list:      l,
@@ -112,8 +105,7 @@ func (m MenuModel) Update(msg tea.Msg) (MenuModel, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
-		// Reserve space for header, status, and help
-		m.list.SetSize(msg.Width-4, msg.Height-10)
+		m.list.SetSize(msg.Width-6, msg.Height-12)
 		return m, nil
 
 	case tea.KeyMsg:
@@ -136,29 +128,34 @@ func (m MenuModel) Update(msg tea.Msg) (MenuModel, tea.Cmd) {
 func (m MenuModel) View() string {
 	var b strings.Builder
 
-	// Header
+	// Minimal header
 	header := lipgloss.NewStyle().
-		Foreground(ui.ColorPrimary).
+		Foreground(ui.ColorTextBright).
 		Bold(true).
-		Render("╔══════════════════════════════════════╗\n" +
-			"║         🔧 TINKER CLI                ║\n" +
-			"╚══════════════════════════════════════╝")
+		Render("tinker")
 
 	b.WriteString(header)
+	b.WriteString("\n")
+
+	// Status line
+	status := m.styles.RenderStatus(m.connected)
+	b.WriteString(status)
 	b.WriteString("\n\n")
 
-	// Status
-	status := m.styles.RenderStatus(m.connected)
-	b.WriteString(fmt.Sprintf("  Status: %s\n\n", status))
+	// Subtle separator
+	separator := lipgloss.NewStyle().
+		Foreground(ui.ColorTextMuted).
+		Render(strings.Repeat("─", 32))
+	b.WriteString(separator)
+	b.WriteString("\n\n")
 
 	// Menu list
 	b.WriteString(m.list.View())
 
-	// Help
+	// Help - minimal
 	b.WriteString("\n")
 	help := m.styles.RenderHelp(
-		"↑/k", "up",
-		"↓/j", "down",
+		"↑↓", "navigate",
 		"enter", "select",
 		"q", "quit",
 	)
@@ -182,7 +179,7 @@ func newMenuDelegate(styles *ui.Styles) menuDelegate {
 }
 
 func (d menuDelegate) Height() int                             { return 2 }
-func (d menuDelegate) Spacing() int                            { return 1 }
+func (d menuDelegate) Spacing() int                            { return 0 }
 func (d menuDelegate) Update(_ tea.Msg, _ *list.Model) tea.Cmd { return nil }
 
 func (d menuDelegate) Render(w io.Writer, m list.Model, index int, item list.Item) {
@@ -193,21 +190,31 @@ func (d menuDelegate) Render(w io.Writer, m list.Model, index int, item list.Ite
 
 	isSelected := index == m.Index()
 
+	// Cursor indicator
+	cursor := "  "
+	if isSelected {
+		cursor = lipgloss.NewStyle().Foreground(ui.ColorPrimary).Render("› ")
+	}
+
 	var title, desc string
 	if isSelected {
-		title = d.styles.MenuItemSelected.Render(fmt.Sprintf(" %s %s", menuItem.icon, menuItem.title))
-		desc = lipgloss.NewStyle().
+		title = lipgloss.NewStyle().
 			Foreground(ui.ColorPrimary).
-			PaddingLeft(4).
-			Render(menuItem.description)
-	} else {
-		title = d.styles.MenuItem.Render(fmt.Sprintf(" %s %s", menuItem.icon, menuItem.title))
+			Bold(true).
+			Render(menuItem.title)
 		desc = lipgloss.NewStyle().
 			Foreground(ui.ColorTextDim).
-			PaddingLeft(4).
+			PaddingLeft(2).
+			Render(menuItem.description)
+	} else {
+		title = lipgloss.NewStyle().
+			Foreground(ui.ColorTextNormal).
+			Render(menuItem.title)
+		desc = lipgloss.NewStyle().
+			Foreground(ui.ColorTextMuted).
+			PaddingLeft(2).
 			Render(menuItem.description)
 	}
 
-	fmt.Fprintf(w, "%s\n%s", title, desc)
+	fmt.Fprintf(w, "%s%s\n%s", cursor, title, desc)
 }
-

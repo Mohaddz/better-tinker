@@ -109,21 +109,18 @@ func (m UsageModel) View() string {
 	var b strings.Builder
 
 	// Title
-	title := m.styles.Title.Render("📊 Usage Statistics")
+	title := m.styles.Title.Render("usage")
 	b.WriteString(title)
 	b.WriteString("\n\n")
 
 	if m.loading {
-		b.WriteString(fmt.Sprintf("%s Loading usage statistics...\n", m.spinner.View()))
+		b.WriteString(fmt.Sprintf("%s loading...\n", m.spinner.View()))
 	} else if m.err != nil {
-		errBox := m.styles.ErrorBox.Render(fmt.Sprintf("Error: %s", m.err))
-		b.WriteString(errBox)
+		b.WriteString(m.styles.ErrorBox.Render(fmt.Sprintf("error: %s", m.err)))
 	} else if m.stats != nil {
-		// Render stats in a nice box
-		statsContent := m.renderStats()
-		b.WriteString(m.styles.InfoBox.Render(statsContent))
+		b.WriteString(m.renderStats())
 	} else {
-		b.WriteString(m.styles.Description.Render("No usage data available"))
+		b.WriteString(m.styles.Description.Render("no data"))
 	}
 
 	// Help
@@ -131,7 +128,6 @@ func (m UsageModel) View() string {
 	help := m.styles.RenderHelp(
 		"r", "refresh",
 		"esc", "back",
-		"q", "quit",
 	)
 	b.WriteString(m.styles.Help.Render(help))
 
@@ -141,51 +137,36 @@ func (m UsageModel) View() string {
 // renderStats renders the usage statistics
 func (m UsageModel) renderStats() string {
 	if m.stats == nil {
-		return "No statistics available"
+		return "no data"
 	}
 
 	var b strings.Builder
 
-	// Create styled stat rows
-	statStyle := lipgloss.NewStyle().
-		Foreground(ui.ColorTextNormal).
-		PaddingBottom(1)
-
 	labelStyle := lipgloss.NewStyle().
 		Foreground(ui.ColorTextDim).
-		Width(20)
+		Width(18)
 
 	valueStyle := lipgloss.NewStyle().
-		Foreground(ui.ColorPrimary).
-		Bold(true)
+		Foreground(ui.ColorTextNormal)
 
 	// Training Runs
-	b.WriteString(statStyle.Render(
-		labelStyle.Render("Training Runs:") +
-			valueStyle.Render(fmt.Sprintf("%d", m.stats.TotalTrainingRuns)),
-	))
-	b.WriteString("\n")
+	b.WriteString(labelStyle.Render("training runs"))
+	b.WriteString(valueStyle.Render(fmt.Sprintf("%d", m.stats.TotalTrainingRuns)))
+	b.WriteString("\n\n")
 
 	// Checkpoints
-	b.WriteString(statStyle.Render(
-		labelStyle.Render("Checkpoints:") +
-			valueStyle.Render(fmt.Sprintf("%d", m.stats.TotalCheckpoints)),
-	))
-	b.WriteString("\n")
+	b.WriteString(labelStyle.Render("checkpoints"))
+	b.WriteString(valueStyle.Render(fmt.Sprintf("%d", m.stats.TotalCheckpoints)))
+	b.WriteString("\n\n")
 
 	// Compute Hours
-	b.WriteString(statStyle.Render(
-		labelStyle.Render("Compute Hours:") +
-			valueStyle.Render(fmt.Sprintf("%.2f hrs", m.stats.ComputeHours)),
-	))
-	b.WriteString("\n")
+	b.WriteString(labelStyle.Render("compute"))
+	b.WriteString(valueStyle.Render(fmt.Sprintf("%.1f hrs", m.stats.ComputeHours)))
+	b.WriteString("\n\n")
 
 	// Storage
-	b.WriteString(statStyle.Render(
-		labelStyle.Render("Storage Used:") +
-			valueStyle.Render(fmt.Sprintf("%.2f GB", m.stats.StorageGB)),
-	))
+	b.WriteString(labelStyle.Render("storage"))
+	b.WriteString(valueStyle.Render(fmt.Sprintf("%.1f GB", m.stats.StorageGB)))
 
 	return b.String()
 }
-

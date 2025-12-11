@@ -49,7 +49,7 @@ type SettingsModel struct {
 // NewSettingsModel creates a new settings model
 func NewSettingsModel(styles *ui.Styles) SettingsModel {
 	ti := textinput.New()
-	ti.Placeholder = "Enter value..."
+	ti.Placeholder = "enter value..."
 	ti.CharLimit = 256
 	ti.Width = 50
 
@@ -92,7 +92,7 @@ func (m SettingsModel) Update(msg tea.Msg) (SettingsModel, tea.Cmd) {
 
 	case SettingsSavedMsg:
 		if msg.Success {
-			m.message = "✓ Settings saved successfully!"
+			m.message = "saved"
 			m.messageStyle = lipgloss.NewStyle().Foreground(ui.ColorSuccess)
 
 			// Refresh displayed values
@@ -102,7 +102,7 @@ func (m SettingsModel) Update(msg tea.Msg) (SettingsModel, tea.Cmd) {
 			}
 			m.bridgeURL = config.GetBridgeURL()
 		} else {
-			m.message = fmt.Sprintf("✗ Error: %s", msg.Error)
+			m.message = fmt.Sprintf("error: %s", msg.Error)
 			m.messageStyle = lipgloss.NewStyle().Foreground(ui.ColorError)
 		}
 		m.editing = false
@@ -159,7 +159,7 @@ func (m SettingsModel) handleNavigationKeys(msg tea.KeyMsg) (SettingsModel, tea.
 		case SettingsAPIKey:
 			m.editing = true
 			m.editingItem = SettingsAPIKey
-			m.textInput.Placeholder = "Enter your Tinker API key..."
+			m.textInput.Placeholder = "enter api key..."
 			m.textInput.SetValue("")
 			m.textInput.EchoMode = textinput.EchoPassword
 			m.textInput.EchoCharacter = '•'
@@ -170,7 +170,7 @@ func (m SettingsModel) handleNavigationKeys(msg tea.KeyMsg) (SettingsModel, tea.
 		case SettingsBridgeURL:
 			m.editing = true
 			m.editingItem = SettingsBridgeURL
-			m.textInput.Placeholder = "Enter bridge server URL..."
+			m.textInput.Placeholder = "enter bridge url..."
 			m.textInput.SetValue(m.bridgeURL)
 			m.textInput.EchoMode = textinput.EchoNormal
 			m.textInput.Focus()
@@ -225,20 +225,15 @@ func (m SettingsModel) View() string {
 	var b strings.Builder
 
 	// Title
-	title := m.styles.Title.Render("⚙️  Settings")
+	title := m.styles.Title.Render("settings")
 	b.WriteString(title)
-	b.WriteString("\n\n")
-
-	// Description
-	desc := m.styles.Description.Render("Configure your Tinker CLI preferences")
-	b.WriteString(desc)
 	b.WriteString("\n\n")
 
 	// Settings items
 	for i, item := range m.items {
 		cursor := "  "
 		if i == m.cursor {
-			cursor = m.styles.Cursor.Render("▸ ")
+			cursor = lipgloss.NewStyle().Foreground(ui.ColorPrimary).Render("› ")
 		}
 
 		var line string
@@ -259,25 +254,20 @@ func (m SettingsModel) View() string {
 		b.WriteString("\n")
 		inputBox := lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
-			BorderForeground(ui.ColorPrimary).
+			BorderForeground(ui.ColorTextMuted).
 			Padding(0, 1).
 			Render(m.textInput.View())
 		b.WriteString(inputBox)
 		b.WriteString("\n")
 
-		hint := m.styles.Help.Render("enter to save • esc to cancel")
+		hint := m.styles.Help.Render("enter save · esc cancel")
 		b.WriteString(hint)
 	}
 
 	// Message
 	if m.message != "" {
 		b.WriteString("\n\n")
-		msgBox := lipgloss.NewStyle().
-			Border(lipgloss.RoundedBorder()).
-			BorderForeground(ui.ColorSuccess).
-			Padding(0, 1).
-			Render(m.messageStyle.Render(m.message))
-		b.WriteString(msgBox)
+		b.WriteString(m.messageStyle.Render(m.message))
 	}
 
 	// Help
@@ -290,9 +280,9 @@ func (m SettingsModel) View() string {
 		)
 	} else {
 		help = m.styles.RenderHelp(
-			"↑/↓", "navigate",
+			"↑↓", "navigate",
 			"enter", "edit",
-			"d", "delete key",
+			"d", "delete",
 			"esc", "back",
 		)
 	}
@@ -302,63 +292,61 @@ func (m SettingsModel) View() string {
 }
 
 func (m SettingsModel) renderAPIKeySetting(selected bool) string {
-	icon := "🔑"
-	title := "API Key"
-
+	title := "api key"
 	var status string
 	statusStyle := lipgloss.NewStyle()
 
 	switch m.apiKeySource {
 	case "environment":
-		status = "Set via environment variable"
+		status = "env"
 		statusStyle = statusStyle.Foreground(ui.ColorSuccess)
 	case "keyring":
-		status = fmt.Sprintf("Stored securely: %s", m.apiKeyMasked)
+		status = m.apiKeyMasked
 		statusStyle = statusStyle.Foreground(ui.ColorSuccess)
 	default:
-		status = "Not configured"
-		statusStyle = statusStyle.Foreground(ui.ColorWarning)
+		status = "not set"
+		statusStyle = statusStyle.Foreground(ui.ColorTextMuted)
 	}
 
-	titleStyle := lipgloss.NewStyle().Bold(true)
+	titleStyle := lipgloss.NewStyle()
 	if selected {
 		titleStyle = titleStyle.Foreground(ui.ColorPrimary)
+	} else {
+		titleStyle = titleStyle.Foreground(ui.ColorTextNormal)
 	}
 
-	return fmt.Sprintf("%s %s\n     %s",
-		icon,
+	return fmt.Sprintf("%s  %s",
 		titleStyle.Render(title),
 		statusStyle.Render(status),
 	)
 }
 
 func (m SettingsModel) renderBridgeURLSetting(selected bool) string {
-	icon := "🌐"
-	title := "Bridge Server URL"
-
-	statusStyle := lipgloss.NewStyle().Foreground(ui.ColorTextMuted)
-	titleStyle := lipgloss.NewStyle().Bold(true)
+	title := "bridge url"
+	statusStyle := lipgloss.NewStyle().Foreground(ui.ColorTextDim)
+	titleStyle := lipgloss.NewStyle()
 	if selected {
 		titleStyle = titleStyle.Foreground(ui.ColorPrimary)
+	} else {
+		titleStyle = titleStyle.Foreground(ui.ColorTextNormal)
 	}
 
-	return fmt.Sprintf("%s %s\n     %s",
-		icon,
+	return fmt.Sprintf("%s  %s",
 		titleStyle.Render(title),
 		statusStyle.Render(m.bridgeURL),
 	)
 }
 
 func (m SettingsModel) renderBackOption(selected bool) string {
-	icon := "←"
-	title := "Back to Menu"
-
-	titleStyle := lipgloss.NewStyle().Bold(true)
+	title := "← back"
+	titleStyle := lipgloss.NewStyle()
 	if selected {
 		titleStyle = titleStyle.Foreground(ui.ColorPrimary)
+	} else {
+		titleStyle = titleStyle.Foreground(ui.ColorTextNormal)
 	}
 
-	return fmt.Sprintf("%s %s", icon, titleStyle.Render(title))
+	return titleStyle.Render(title)
 }
 
 // IsEditing returns true if currently editing a setting
@@ -381,4 +369,3 @@ func (m *SettingsModel) RefreshConfig() {
 	}
 	m.bridgeURL = config.GetBridgeURL()
 }
-

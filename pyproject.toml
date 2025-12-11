@@ -1,6 +1,6 @@
 [project]
 name = "better-tinker"
-version = "0.1.5"
+version = "0.2.0"
 description = "Tinker CLI wrapper and bridge"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -9,7 +9,8 @@ dependencies = [
     "uvicorn[standard]>=0.24.0",
     "pydantic>=2.0.0",
     "tinker",
-    "keyring>=24.0.0",
+    # Note: keyring is NOT needed here - the Go CLI handles keyring access
+    # and passes the API key via Authorization header to the bridge
 ]
 
 [project.scripts]

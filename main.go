@@ -8,7 +8,6 @@ import (
 
 	"github.com/charmbracelet/bubbles/list"
 	"github.com/charmbracelet/bubbles/spinner"
-	"github.com/charmbracelet/bubbles/table"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -31,7 +30,6 @@ const (
 // MenuItem represents a menu option
 type menuItem struct {
 	title, desc string
-	icon        string
 	view        viewType
 }
 
@@ -54,10 +52,6 @@ type model struct {
 
 	// Menu
 	menu list.Model
-
-	// Tables
-	runsTable        table.Model
-	checkpointsTable table.Model
 
 	// Spinner for loading states
 	spinner spinner.Model
@@ -83,12 +77,16 @@ type model struct {
 	treeCursor   int             // Current cursor position in tree
 	scrollOffset int             // Scroll offset for tree view
 
+	// Checkpoints view state
+	cpCursor       int
+	cpScrollOffset int
+
 	// Confirmation dialog state
-	showConfirm    bool
-	confirmAction  string
-	confirmIndex   int
-	confirmRunIdx  int // For tree view confirmations
-	confirmCpIdx   int // For tree view confirmations
+	showConfirm   bool
+	confirmAction string
+	confirmIndex  int
+	confirmRunIdx int // For tree view confirmations
+	confirmCpIdx  int // For tree view confirmations
 
 	// Settings state
 	settingsCursor   int
@@ -114,40 +112,18 @@ func initialModel() model {
 
 	// Create menu
 	items := []list.Item{
-		menuItem{title: "Training Runs", desc: "View runs with checkpoints grouped under each run", icon: "🚀", view: viewRuns},
-		menuItem{title: "All Checkpoints", desc: "Browse all checkpoints in a flat list", icon: "💾", view: viewCheckpoints},
-		menuItem{title: "Usage Statistics", desc: "View your API usage and quotas", icon: "📊", view: viewUsage},
-		menuItem{title: "Settings", desc: "Configure API key and preferences", icon: "⚙️", view: viewSettings},
+		menuItem{title: "Training Runs", desc: "View runs with checkpoints", view: viewRuns},
+		menuItem{title: "Checkpoints", desc: "Browse all checkpoints", view: viewCheckpoints},
+		menuItem{title: "Usage", desc: "API usage and quotas", view: viewUsage},
+		menuItem{title: "Settings", desc: "Configure preferences", view: viewSettings},
 	}
 
 	delegate := newMenuDelegate(styles)
 	menu := list.New(items, delegate, 0, 0)
-	menu.Title = ""
 	menu.SetShowStatusBar(false)
 	menu.SetFilteringEnabled(false)
 	menu.SetShowHelp(false)
-
-	// Create runs table
-	runsCols := []table.Column{
-		{Title: "ID", Width: 20},
-		{Title: "Base Model", Width: 30},
-		{Title: "LoRA", Width: 8},
-		{Title: "Status", Width: 12},
-		{Title: "Created", Width: 18},
-	}
-	runsTable := table.New(table.WithColumns(runsCols), table.WithFocused(true), table.WithHeight(10))
-	runsTable.SetStyles(tableStyles())
-
-	// Create checkpoints table
-	cpCols := []table.Column{
-		{Title: "Name", Width: 20},
-		{Title: "Type", Width: 12},
-		{Title: "Training Run", Width: 20},
-		{Title: "Published", Width: 10},
-		{Title: "Created", Width: 18},
-	}
-	checkpointsTable := table.New(table.WithColumns(cpCols), table.WithFocused(true), table.WithHeight(10))
-	checkpointsTable.SetStyles(tableStyles())
+	menu.SetShowTitle(false)
 
 	// Create spinner
 	sp := spinner.New()
@@ -156,39 +132,22 @@ func initialModel() model {
 
 	// Create settings text input
 	settingsInput := textinput.New()
-	settingsInput.Placeholder = "Enter value..."
+	settingsInput.Placeholder = "enter value..."
 	settingsInput.CharLimit = 256
 	settingsInput.Width = 50
 
 	return model{
-		view:             viewMenu,
-		menu:             menu,
-		runsTable:        runsTable,
-		checkpointsTable: checkpointsTable,
-		spinner:          sp,
-		client:           client,
-		connected:        connected,
-		styles:           styles,
-		err:              err,
-		settingsInput:    settingsInput,
-		expandedRuns:     make(map[string]bool),
-		loadingRuns:      make(map[string]bool),
+		view:          viewMenu,
+		menu:          menu,
+		spinner:       sp,
+		client:        client,
+		connected:     connected,
+		styles:        styles,
+		err:           err,
+		settingsInput: settingsInput,
+		expandedRuns:  make(map[string]bool),
+		loadingRuns:   make(map[string]bool),
 	}
-}
-
-func tableStyles() table.Styles {
-	s := table.DefaultStyles()
-	s.Header = s.Header.
-		BorderStyle(lipgloss.NormalBorder()).
-		BorderForeground(ui.ColorTextMuted).
-		BorderBottom(true).
-		Bold(true).
-		Foreground(ui.ColorPrimary)
-	s.Selected = s.Selected.
-		Foreground(ui.ColorBgDark).
-		Background(ui.ColorPrimary).
-		Bold(true)
-	return s
 }
 
 // Messages for async operations
@@ -219,14 +178,12 @@ type settingsSavedMsg struct {
 	err     error
 }
 
-// Message for loading checkpoints for a specific run
 type runCheckpointsLoadedMsg struct {
 	runID       string
 	checkpoints []api.Checkpoint
 	err         error
 }
 
-// Message for checkpoint actions within runs view
 type runCheckpointActionMsg struct {
 	action  string
 	runID   string
@@ -238,7 +195,7 @@ type runCheckpointActionMsg struct {
 func loadRuns(client *api.Client) tea.Cmd {
 	return func() tea.Msg {
 		if client == nil {
-			return runsLoadedMsg{err: fmt.Errorf("not connected to API")}
+			return runsLoadedMsg{err: fmt.Errorf("not connected")}
 		}
 		resp, err := client.ListTrainingRuns(50, 0)
 		if err != nil {
@@ -251,7 +208,7 @@ func loadRuns(client *api.Client) tea.Cmd {
 func loadCheckpoints(client *api.Client) tea.Cmd {
 	return func() tea.Msg {
 		if client == nil {
-			return checkpointsLoadedMsg{err: fmt.Errorf("not connected to API")}
+			return checkpointsLoadedMsg{err: fmt.Errorf("not connected")}
 		}
 		resp, err := client.ListUserCheckpoints()
 		if err != nil {
@@ -264,7 +221,7 @@ func loadCheckpoints(client *api.Client) tea.Cmd {
 func loadUsage(client *api.Client) tea.Cmd {
 	return func() tea.Msg {
 		if client == nil {
-			return usageLoadedMsg{err: fmt.Errorf("not connected to API")}
+			return usageLoadedMsg{err: fmt.Errorf("not connected")}
 		}
 		stats, err := client.GetUsageStats()
 		if err != nil {
@@ -295,11 +252,10 @@ func deleteCheckpoint(client *api.Client, id string) tea.Cmd {
 	}
 }
 
-// Load checkpoints for a specific training run
 func loadRunCheckpoints(client *api.Client, runID string) tea.Cmd {
 	return func() tea.Msg {
 		if client == nil {
-			return runCheckpointsLoadedMsg{runID: runID, err: fmt.Errorf("not connected to API")}
+			return runCheckpointsLoadedMsg{runID: runID, err: fmt.Errorf("not connected")}
 		}
 		resp, err := client.ListCheckpoints(runID)
 		if err != nil {
@@ -309,7 +265,6 @@ func loadRunCheckpoints(client *api.Client, runID string) tea.Cmd {
 	}
 }
 
-// Checkpoint actions within runs view
 func publishRunCheckpoint(client *api.Client, path, runID string) tea.Cmd {
 	return func() tea.Msg {
 		_, err := client.PublishCheckpoint(path)
@@ -363,9 +318,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
-		m.menu.SetSize(msg.Width-4, msg.Height-12)
-		m.runsTable.SetHeight(msg.Height - 14)
-		m.checkpointsTable.SetHeight(msg.Height - 14)
+		m.menu.SetSize(msg.Width-6, msg.Height-12)
 		return m, nil
 
 	case runsLoadedMsg:
@@ -374,7 +327,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.err = msg.err
 		} else {
 			m.runs = msg.runs
-			m.updateRunsTable()
 			m.rebuildTreeItems()
 		}
 		return m, nil
@@ -382,10 +334,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case runCheckpointsLoadedMsg:
 		delete(m.loadingRuns, msg.runID)
 		if msg.err != nil {
-			m.statusMsg = fmt.Sprintf("Error loading checkpoints: %s", msg.err)
+			m.statusMsg = fmt.Sprintf("error: %s", msg.err)
 			return m, nil
 		}
-		// Find the run and update its checkpoints
 		for i := range m.runs {
 			if m.runs[i].ID == msg.runID {
 				m.runs[i].Checkpoints = msg.checkpoints
@@ -399,10 +350,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.loading = false
 		m.showConfirm = false
 		if msg.err != nil {
-			m.statusMsg = fmt.Sprintf("Error: %s", msg.err)
+			m.statusMsg = fmt.Sprintf("error: %s", msg.err)
 		} else {
-			m.statusMsg = fmt.Sprintf("Successfully %sed checkpoint", msg.action)
-			// Refresh the checkpoints for this run
+			m.statusMsg = fmt.Sprintf("%sed", msg.action)
 			m.loadingRuns[msg.runID] = true
 			return m, tea.Batch(m.spinner.Tick, loadRunCheckpoints(m.client, msg.runID))
 		}
@@ -414,7 +364,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.err = msg.err
 		} else {
 			m.checkpoints = msg.checkpoints
-			m.updateCheckpointsTable()
 		}
 		return m, nil
 
@@ -431,10 +380,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.loading = false
 		m.showConfirm = false
 		if msg.err != nil {
-			m.statusMsg = fmt.Sprintf("Error: %s", msg.err)
+			m.statusMsg = fmt.Sprintf("error: %s", msg.err)
 		} else {
-			m.statusMsg = fmt.Sprintf("Successfully %sed", msg.action)
-			// Refresh checkpoints
+			m.statusMsg = fmt.Sprintf("%sed", msg.action)
 			m.loading = true
 			return m, tea.Batch(m.spinner.Tick, loadCheckpoints(m.client))
 		}
@@ -444,10 +392,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.settingsEditing = false
 		m.settingsInput.Blur()
 		if msg.err != nil {
-			m.settingsMessage = fmt.Sprintf("✗ Error: %s", msg.err)
+			m.settingsMessage = fmt.Sprintf("error: %s", msg.err)
 		} else {
-			m.settingsMessage = "✓ Settings saved successfully!"
-			// Try to reconnect with new credentials
+			m.settingsMessage = "saved"
 			if client, err := api.NewClient(); err == nil {
 				m.client = client
 				m.connected = true
@@ -469,7 +416,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			switch msg.String() {
 			case "y", "Y":
 				m.showConfirm = false
-				// Handle confirmation for runs tree view (checkpoint actions)
 				if m.view == viewRuns {
 					if m.confirmRunIdx >= 0 && m.confirmRunIdx < len(m.runs) {
 						run := m.runs[m.confirmRunIdx]
@@ -487,7 +433,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						}
 					}
 				} else if m.confirmIndex >= 0 && m.confirmIndex < len(m.checkpoints) {
-					// Handle confirmation for checkpoints view
 					cp := m.checkpoints[m.confirmIndex]
 					m.loading = true
 					switch m.confirmAction {
@@ -517,7 +462,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		case "esc":
 			if m.view == viewSettings && m.settingsEditing {
-				// Cancel editing
 				m.settingsEditing = false
 				m.settingsInput.Blur()
 				m.settingsMessage = ""
@@ -544,6 +488,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						return m, tea.Batch(m.spinner.Tick, loadRuns(m.client))
 					case viewCheckpoints:
 						m.loading = true
+						m.cpCursor = 0
+						m.cpScrollOffset = 0
 						return m, tea.Batch(m.spinner.Tick, loadCheckpoints(m.client))
 					case viewUsage:
 						m.loading = true
@@ -555,10 +501,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					}
 				}
 			}
-			// Handle enter in settings view
 			if m.view == viewSettings {
 				if m.settingsEditing {
-					// Save the setting
 					value := m.settingsInput.Value()
 					if m.settingsEditItem == 0 {
 						return m, saveAPIKey(value)
@@ -566,12 +510,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						return m, saveBridgeURL(value)
 					}
 				} else {
-					// Start editing
 					if m.settingsCursor == 0 {
-						// Edit API Key
 						m.settingsEditing = true
 						m.settingsEditItem = 0
-						m.settingsInput.Placeholder = "Enter your Tinker API key..."
+						m.settingsInput.Placeholder = "enter api key..."
 						m.settingsInput.SetValue("")
 						m.settingsInput.EchoMode = textinput.EchoPassword
 						m.settingsInput.EchoCharacter = '•'
@@ -579,17 +521,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						m.settingsMessage = ""
 						return m, textinput.Blink
 					} else if m.settingsCursor == 1 {
-						// Edit Bridge URL
 						m.settingsEditing = true
 						m.settingsEditItem = 1
-						m.settingsInput.Placeholder = "Enter bridge server URL..."
+						m.settingsInput.Placeholder = "enter bridge url..."
 						m.settingsInput.SetValue(config.GetBridgeURL())
 						m.settingsInput.EchoMode = textinput.EchoNormal
 						m.settingsInput.Focus()
 						m.settingsMessage = ""
 						return m, textinput.Blink
 					} else if m.settingsCursor == 2 {
-						// Back
 						m.view = viewMenu
 						return m, nil
 					}
@@ -597,14 +537,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 
 		case "r":
-			// Refresh current view
 			if m.view != viewMenu {
 				m.loading = true
 				m.err = nil
 				m.statusMsg = ""
 				switch m.view {
 				case viewRuns:
-					// Reset expanded state and reload
 					m.expandedRuns = make(map[string]bool)
 					m.loadingRuns = make(map[string]bool)
 					return m, tea.Batch(m.spinner.Tick, loadRuns(m.client))
@@ -616,12 +554,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 
 		case "p":
-			// Publish/unpublish checkpoint
 			if m.view == viewCheckpoints && !m.loading {
-				if idx := m.checkpointsTable.Cursor(); idx >= 0 && idx < len(m.checkpoints) {
-					cp := m.checkpoints[idx]
+				if m.cpCursor >= 0 && m.cpCursor < len(m.checkpoints) {
+					cp := m.checkpoints[m.cpCursor]
 					m.showConfirm = true
-					m.confirmIndex = idx
+					m.confirmIndex = m.cpCursor
 					if cp.IsPublished {
 						m.confirmAction = "unpublish"
 					} else {
@@ -629,7 +566,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					}
 				}
 			}
-			// Publish/unpublish in runs tree view (only for checkpoints)
 			if m.view == viewRuns && !m.loading {
 				if m.treeCursor >= 0 && m.treeCursor < len(m.treeItems) {
 					item := m.treeItems[m.treeCursor]
@@ -651,15 +587,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 
 		case "d":
-			// Delete checkpoint
 			if m.view == viewCheckpoints && !m.loading {
-				if idx := m.checkpointsTable.Cursor(); idx >= 0 && idx < len(m.checkpoints) {
+				if m.cpCursor >= 0 && m.cpCursor < len(m.checkpoints) {
 					m.showConfirm = true
 					m.confirmAction = "delete"
-					m.confirmIndex = idx
+					m.confirmIndex = m.cpCursor
 				}
 			}
-			// Delete checkpoint in runs tree view (only for checkpoints)
 			if m.view == viewRuns && !m.loading {
 				if m.treeCursor >= 0 && m.treeCursor < len(m.treeItems) {
 					item := m.treeItems[m.treeCursor]
@@ -671,23 +605,19 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					}
 				}
 			}
-			// Delete API key in settings
 			if m.view == viewSettings && !m.settingsEditing && m.settingsCursor == 0 {
 				return m, deleteAPIKey()
 			}
 
 		case " ":
-			// Toggle expand/collapse for runs in tree view
 			if m.view == viewRuns && !m.loading {
 				if m.treeCursor >= 0 && m.treeCursor < len(m.treeItems) {
 					item := m.treeItems[m.treeCursor]
 					if item.isRun && item.runIndex < len(m.runs) {
 						run := m.runs[item.runIndex]
 						if m.expandedRuns[run.ID] {
-							// Collapse
 							delete(m.expandedRuns, run.ID)
 						} else {
-							// Expand and load checkpoints if needed
 							m.expandedRuns[run.ID] = true
 							if len(run.Checkpoints) == 0 && !m.loadingRuns[run.ID] {
 								m.loadingRuns[run.ID] = true
@@ -714,10 +644,17 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				return m, nil
 			}
+			if m.view == viewCheckpoints && !m.loading {
+				if m.cpCursor > 0 {
+					m.cpCursor--
+					m.ensureCpVisible()
+				}
+				return m, nil
+			}
 
 		case "down", "j":
 			if m.view == viewSettings && !m.settingsEditing {
-				if m.settingsCursor < 2 { // 3 items: API Key, Bridge URL, Back
+				if m.settingsCursor < 2 {
 					m.settingsCursor++
 				}
 				return m, nil
@@ -729,6 +666,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				return m, nil
 			}
+			if m.view == viewCheckpoints && !m.loading {
+				if m.cpCursor < len(m.checkpoints)-1 {
+					m.cpCursor++
+					m.ensureCpVisible()
+				}
+				return m, nil
+			}
 		}
 	}
 
@@ -737,14 +681,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case viewMenu:
 		var cmd tea.Cmd
 		m.menu, cmd = m.menu.Update(msg)
-		cmds = append(cmds, cmd)
-	case viewRuns:
-		var cmd tea.Cmd
-		m.runsTable, cmd = m.runsTable.Update(msg)
-		cmds = append(cmds, cmd)
-	case viewCheckpoints:
-		var cmd tea.Cmd
-		m.checkpointsTable, cmd = m.checkpointsTable.Update(msg)
 		cmds = append(cmds, cmd)
 	case viewSettings:
 		if m.settingsEditing {
@@ -776,42 +712,32 @@ func (m model) View() string {
 func (m model) menuView() string {
 	var b strings.Builder
 
-	// Header
+	// Minimal header
 	header := lipgloss.NewStyle().
-		Foreground(ui.ColorPrimary).
+		Foreground(ui.ColorTextBright).
 		Bold(true).
-		Render(`
-╔══════════════════════════════════════╗
-║         🔧 TINKER CLI                ║
-╚══════════════════════════════════════╝`)
-
+		Render("tinker")
 	b.WriteString(header)
-	b.WriteString("\n\n")
+	b.WriteString("\n")
 
 	// Status
 	status := m.styles.RenderStatus(m.connected)
-	b.WriteString(fmt.Sprintf("  Status: %s\n", status))
+	b.WriteString(status)
+	b.WriteString("\n\n")
 
-	if !m.connected && m.err != nil {
-		errMsg := lipgloss.NewStyle().
-			Foreground(ui.ColorError).
-			Italic(true).
-			Render(fmt.Sprintf("  (%s)", m.err))
-		b.WriteString(errMsg)
-	}
-	b.WriteString("\n")
+	// Separator
+	separator := lipgloss.NewStyle().
+		Foreground(ui.ColorTextMuted).
+		Render(strings.Repeat("─", 32))
+	b.WriteString(separator)
+	b.WriteString("\n\n")
 
 	// Menu
 	b.WriteString(m.menu.View())
 
 	// Help
 	b.WriteString("\n")
-	help := m.styles.RenderHelp(
-		"↑/k", "up",
-		"↓/j", "down",
-		"enter", "select",
-		"q", "quit",
-	)
+	help := m.styles.RenderHelp("↑↓", "navigate", "enter", "select", "q", "quit")
 	b.WriteString(m.styles.Help.Render(help))
 
 	return m.styles.App.Render(b.String())
@@ -820,38 +746,37 @@ func (m model) menuView() string {
 func (m model) runsView() string {
 	var b strings.Builder
 
-	title := m.styles.Title.Render("🚀 Training Runs")
+	// Title
+	title := m.styles.Title.Render("training runs")
 	b.WriteString(title)
+	b.WriteString("\n")
+
+	// Stats
+	stats := m.styles.Description.Render(fmt.Sprintf("%d total", len(m.runs)))
+	b.WriteString(stats)
 	b.WriteString("\n\n")
 
 	if m.loading && len(m.runs) == 0 {
-		b.WriteString(fmt.Sprintf("%s Loading training runs...\n", m.spinner.View()))
+		b.WriteString(fmt.Sprintf("%s loading...\n", m.spinner.View()))
 	} else if m.err != nil {
-		b.WriteString(m.styles.ErrorBox.Render(fmt.Sprintf("Error: %s", m.err)))
+		b.WriteString(m.styles.ErrorBox.Render(fmt.Sprintf("error: %s", m.err)))
 	} else {
-		stats := m.styles.Description.Render(fmt.Sprintf("Total: %d runs • Press Space to expand/collapse", len(m.runs)))
-		b.WriteString(stats)
-		b.WriteString("\n\n")
-
-		// Render tree view
 		b.WriteString(m.renderTreeView())
 
-		// Status message
 		if m.statusMsg != "" {
 			b.WriteString("\n")
-			if strings.HasPrefix(m.statusMsg, "Error") {
+			if strings.HasPrefix(m.statusMsg, "error") {
 				b.WriteString(m.styles.ErrorBox.Render(m.statusMsg))
 			} else {
 				b.WriteString(m.styles.SuccessBox.Render(m.statusMsg))
 			}
 		}
 
-		// Confirmation dialog for runs view
 		if m.showConfirm && m.confirmRunIdx >= 0 && m.confirmRunIdx < len(m.runs) {
 			run := m.runs[m.confirmRunIdx]
 			if m.confirmCpIdx >= 0 && m.confirmCpIdx < len(run.Checkpoints) {
 				cp := run.Checkpoints[m.confirmCpIdx]
-				confirmMsg := fmt.Sprintf("Are you sure you want to %s checkpoint '%s'? (y/n)", m.confirmAction, cp.Name)
+				confirmMsg := fmt.Sprintf("%s '%s'? y/n", m.confirmAction, cp.Name)
 				b.WriteString("\n")
 				b.WriteString(m.styles.WarningBox.Render(confirmMsg))
 			}
@@ -859,18 +784,16 @@ func (m model) runsView() string {
 	}
 
 	b.WriteString("\n\n")
-	help := m.styles.RenderHelp("↑/↓", "navigate", "space", "expand/collapse", "r", "refresh", "p", "publish", "d", "delete", "esc", "back")
+	help := m.styles.RenderHelp("↑↓", "move", "space", "expand", "r", "refresh", "p", "publish", "d", "delete", "esc", "back")
 	b.WriteString(m.styles.Help.Render(help))
 
 	return m.styles.App.Render(b.String())
 }
 
-// renderTreeView renders the tree view of runs and checkpoints
 func (m model) renderTreeView() string {
 	var b strings.Builder
 
-	// Calculate visible range
-	visibleLines := m.height - 18
+	visibleLines := m.height - 14
 	if visibleLines < 5 {
 		visibleLines = 5
 	}
@@ -881,20 +804,8 @@ func (m model) renderTreeView() string {
 		endIdx = len(m.treeItems)
 	}
 
-	// Header
-	headerStyle := lipgloss.NewStyle().
-		Foreground(ui.ColorPrimary).
-		Bold(true).
-		BorderStyle(lipgloss.NormalBorder()).
-		BorderBottom(true).
-		BorderForeground(ui.ColorTextMuted)
-
-	header := fmt.Sprintf("  %-24s %-25s %-10s %-12s %-18s", "ID/Name", "Base Model/Type", "LoRA/Pub", "Status", "Created")
-	b.WriteString(headerStyle.Render(header))
-	b.WriteString("\n")
-
 	if len(m.treeItems) == 0 {
-		b.WriteString(m.styles.Description.Render("  No training runs found"))
+		b.WriteString(m.styles.Description.Render("no runs"))
 		return b.String()
 	}
 
@@ -910,16 +821,14 @@ func (m model) renderTreeView() string {
 		b.WriteString("\n")
 	}
 
-	// Scroll indicator
 	if len(m.treeItems) > visibleLines {
-		scrollInfo := fmt.Sprintf("  Showing %d-%d of %d items", startIdx+1, endIdx, len(m.treeItems))
+		scrollInfo := fmt.Sprintf("%d-%d of %d", startIdx+1, endIdx, len(m.treeItems))
 		b.WriteString(m.styles.Description.Render(scrollInfo))
 	}
 
 	return b.String()
 }
 
-// renderRunRow renders a single run row
 func (m model) renderRunRow(runIdx int, isSelected bool) string {
 	if runIdx >= len(m.runs) {
 		return ""
@@ -927,65 +836,45 @@ func (m model) renderRunRow(runIdx int, isSelected bool) string {
 
 	run := m.runs[runIdx]
 
-	// Expand/collapse indicator
-	expandIcon := "▶"
+	expandIcon := "▸"
 	if m.expandedRuns[run.ID] {
-		expandIcon = "▼"
+		expandIcon = "▾"
 	}
-
-	// Loading indicator
 	if m.loadingRuns[run.ID] {
 		expandIcon = m.spinner.View()
 	}
 
-	loraStr := "No"
-	if run.IsLoRA {
-		loraStr = "Yes"
-		if run.LoRAConfig != nil {
-			loraStr = fmt.Sprintf("r%d", run.LoRAConfig.Rank)
-		}
-	}
-
-	created := "N/A"
-	if !run.CreatedAt.IsZero() {
-		created = run.CreatedAt.Format("2006-01-02 15:04")
-	}
-
 	status := run.Status
 	if status == "" {
-		status = "unknown"
+		status = "–"
 	}
 
-	// Format checkpoint count
-	cpCount := len(run.Checkpoints)
-	cpInfo := ""
-	if m.expandedRuns[run.ID] && cpCount > 0 {
-		cpInfo = fmt.Sprintf(" (%d)", cpCount)
+	model := truncate(run.BaseModel, 20)
+	created := "–"
+	if !run.CreatedAt.IsZero() {
+		created = run.CreatedAt.Format("Jan 02 15:04")
 	}
 
-	row := fmt.Sprintf("%s %-22s %-25s %-10s %-12s %-18s",
+	cursor := "  "
+	if isSelected {
+		cursor = lipgloss.NewStyle().Foreground(ui.ColorPrimary).Render("› ")
+	}
+
+	row := fmt.Sprintf("%s %s %-20s %-12s %s",
 		expandIcon,
-		truncate(run.ID, 22)+cpInfo,
-		truncate(run.BaseModel, 25),
-		loraStr,
+		truncate(run.ID, 12),
+		model,
 		status,
 		created,
 	)
 
 	if isSelected {
-		return lipgloss.NewStyle().
-			Foreground(ui.ColorBgDark).
-			Background(ui.ColorPrimary).
-			Bold(true).
-			Render(row)
+		return cursor + lipgloss.NewStyle().Foreground(ui.ColorPrimary).Render(row)
 	}
 
-	return lipgloss.NewStyle().
-		Foreground(ui.ColorTextNormal).
-		Render(row)
+	return cursor + lipgloss.NewStyle().Foreground(ui.ColorTextNormal).Render(row)
 }
 
-// renderCheckpointRow renders a single checkpoint row (indented under run)
 func (m model) renderCheckpointRow(runIdx, cpIdx int, isSelected bool) string {
 	if runIdx >= len(m.runs) {
 		return ""
@@ -996,63 +885,57 @@ func (m model) renderCheckpointRow(runIdx, cpIdx int, isSelected bool) string {
 	}
 	cp := run.Checkpoints[cpIdx]
 
-	published := "No"
+	published := "·"
 	if cp.IsPublished {
-		published = "Yes"
+		published = "●"
 	}
 
-	created := "N/A"
+	created := "–"
 	if !cp.CreatedAt.IsZero() {
-		created = cp.CreatedAt.Format("2006-01-02 15:04")
+		created = cp.CreatedAt.Format("Jan 02 15:04")
 	}
 
-	cpType := cp.Type
-	if cpType == "" {
-		cpType = "unknown"
+	cursor := "  "
+	if isSelected {
+		cursor = lipgloss.NewStyle().Foreground(ui.ColorAccent).Render("› ")
 	}
 
-	// Indent checkpoints with tree branch indicator
-	row := fmt.Sprintf("    └─ %-18s %-25s %-10s %-12s %-18s",
+	row := fmt.Sprintf("    └ %-18s %s %s",
 		truncate(cp.Name, 18),
-		cpType,
 		published,
-		"checkpoint",
 		created,
 	)
 
 	if isSelected {
-		return lipgloss.NewStyle().
-			Foreground(ui.ColorBgDark).
-			Background(ui.ColorSecondary).
-			Bold(true).
-			Render(row)
+		return cursor + lipgloss.NewStyle().Foreground(ui.ColorAccent).Render(row)
 	}
 
-	return lipgloss.NewStyle().
-		Foreground(ui.ColorTextDim).
-		Render(row)
+	return cursor + lipgloss.NewStyle().Foreground(ui.ColorTextDim).Render(row)
 }
 
 func (m model) checkpointsView() string {
 	var b strings.Builder
 
-	title := m.styles.Title.Render("💾 Checkpoints")
+	// Title
+	title := m.styles.Title.Render("checkpoints")
 	b.WriteString(title)
+	b.WriteString("\n")
+
+	// Stats
+	stats := m.styles.Description.Render(fmt.Sprintf("%d total", len(m.checkpoints)))
+	b.WriteString(stats)
 	b.WriteString("\n\n")
 
 	if m.loading {
-		b.WriteString(fmt.Sprintf("%s Loading checkpoints...\n", m.spinner.View()))
+		b.WriteString(fmt.Sprintf("%s loading...\n", m.spinner.View()))
 	} else if m.err != nil {
-		b.WriteString(m.styles.ErrorBox.Render(fmt.Sprintf("Error: %s", m.err)))
+		b.WriteString(m.styles.ErrorBox.Render(fmt.Sprintf("error: %s", m.err)))
 	} else {
-		stats := m.styles.Description.Render(fmt.Sprintf("Total: %d checkpoints", len(m.checkpoints)))
-		b.WriteString(stats)
-		b.WriteString("\n\n")
-		b.WriteString(m.checkpointsTable.View())
+		b.WriteString(m.renderCheckpointsList())
 
 		if m.statusMsg != "" {
 			b.WriteString("\n")
-			if strings.HasPrefix(m.statusMsg, "Error") {
+			if strings.HasPrefix(m.statusMsg, "error") {
 				b.WriteString(m.styles.ErrorBox.Render(m.statusMsg))
 			} else {
 				b.WriteString(m.styles.SuccessBox.Render(m.statusMsg))
@@ -1061,132 +944,203 @@ func (m model) checkpointsView() string {
 
 		if m.showConfirm && m.confirmIndex >= 0 && m.confirmIndex < len(m.checkpoints) {
 			cp := m.checkpoints[m.confirmIndex]
-			confirmMsg := fmt.Sprintf("Are you sure you want to %s checkpoint '%s'? (y/n)", m.confirmAction, cp.Name)
+			confirmMsg := fmt.Sprintf("%s '%s'? y/n", m.confirmAction, cp.Name)
 			b.WriteString("\n")
 			b.WriteString(m.styles.WarningBox.Render(confirmMsg))
 		}
 	}
 
 	b.WriteString("\n\n")
-	help := m.styles.RenderHelp("↑/↓", "navigate", "r", "refresh", "p", "publish/unpublish", "d", "delete", "esc", "back")
+	help := m.styles.RenderHelp("↑↓", "move", "r", "refresh", "p", "publish", "d", "delete", "esc", "back")
 	b.WriteString(m.styles.Help.Render(help))
 
 	return m.styles.App.Render(b.String())
+}
+
+func (m model) renderCheckpointsList() string {
+	var b strings.Builder
+
+	if len(m.checkpoints) == 0 {
+		b.WriteString(m.styles.Description.Render("no checkpoints"))
+		return b.String()
+	}
+
+	visibleLines := m.height - 12
+	if visibleLines < 5 {
+		visibleLines = 5
+	}
+
+	startIdx := m.cpScrollOffset
+	endIdx := m.cpScrollOffset + visibleLines
+	if endIdx > len(m.checkpoints) {
+		endIdx = len(m.checkpoints)
+	}
+
+	for idx := startIdx; idx < endIdx; idx++ {
+		cp := m.checkpoints[idx]
+		isSelected := idx == m.cpCursor
+
+		cursor := "  "
+		if isSelected {
+			cursor = lipgloss.NewStyle().Foreground(ui.ColorPrimary).Render("› ")
+		}
+
+		published := "·"
+		if cp.IsPublished {
+			published = "●"
+		}
+
+		created := "–"
+		if !cp.CreatedAt.IsZero() {
+			created = cp.CreatedAt.Format("Jan 02")
+		}
+
+		row := fmt.Sprintf("%-20s %s %-12s %s",
+			truncate(cp.Name, 20),
+			published,
+			truncate(cp.Type, 12),
+			created,
+		)
+
+		if isSelected {
+			b.WriteString(cursor + lipgloss.NewStyle().Foreground(ui.ColorPrimary).Render(row))
+		} else {
+			b.WriteString(cursor + lipgloss.NewStyle().Foreground(ui.ColorTextNormal).Render(row))
+		}
+		b.WriteString("\n")
+	}
+
+	if len(m.checkpoints) > visibleLines {
+		scrollInfo := fmt.Sprintf("%d-%d of %d", startIdx+1, endIdx, len(m.checkpoints))
+		b.WriteString(m.styles.Description.Render(scrollInfo))
+	}
+
+	return b.String()
 }
 
 func (m model) usageView() string {
 	var b strings.Builder
 
-	title := m.styles.Title.Render("📊 Usage Statistics")
+	title := m.styles.Title.Render("usage")
 	b.WriteString(title)
 	b.WriteString("\n\n")
 
 	if m.loading {
-		b.WriteString(fmt.Sprintf("%s Loading usage statistics...\n", m.spinner.View()))
+		b.WriteString(fmt.Sprintf("%s loading...\n", m.spinner.View()))
 	} else if m.err != nil {
-		b.WriteString(m.styles.ErrorBox.Render(fmt.Sprintf("Error: %s", m.err)))
+		b.WriteString(m.styles.ErrorBox.Render(fmt.Sprintf("error: %s", m.err)))
 	} else if m.usageStats != nil {
-		b.WriteString(m.styles.InfoBox.Render(m.renderUsageStats()))
+		b.WriteString(m.renderUsageStats())
 	} else {
-		b.WriteString(m.styles.Description.Render("No usage data available"))
+		b.WriteString(m.styles.Description.Render("no data"))
 	}
 
 	b.WriteString("\n\n")
-	help := m.styles.RenderHelp("r", "refresh", "esc", "back", "q", "quit")
+	help := m.styles.RenderHelp("r", "refresh", "esc", "back")
 	b.WriteString(m.styles.Help.Render(help))
 
 	return m.styles.App.Render(b.String())
 }
 
+func (m model) renderUsageStats() string {
+	if m.usageStats == nil {
+		return "no data"
+	}
+
+	var b strings.Builder
+	labelStyle := lipgloss.NewStyle().Foreground(ui.ColorTextDim).Width(18)
+	valueStyle := lipgloss.NewStyle().Foreground(ui.ColorTextNormal)
+
+	b.WriteString(labelStyle.Render("training runs"))
+	b.WriteString(valueStyle.Render(fmt.Sprintf("%d", m.usageStats.TotalTrainingRuns)))
+	b.WriteString("\n\n")
+
+	b.WriteString(labelStyle.Render("checkpoints"))
+	b.WriteString(valueStyle.Render(fmt.Sprintf("%d", m.usageStats.TotalCheckpoints)))
+	b.WriteString("\n\n")
+
+	b.WriteString(labelStyle.Render("compute"))
+	b.WriteString(valueStyle.Render(fmt.Sprintf("%.1f hrs", m.usageStats.ComputeHours)))
+	b.WriteString("\n\n")
+
+	b.WriteString(labelStyle.Render("storage"))
+	b.WriteString(valueStyle.Render(fmt.Sprintf("%.1f GB", m.usageStats.StorageGB)))
+
+	return b.String()
+}
+
 func (m model) settingsView() string {
 	var b strings.Builder
 
-	title := m.styles.Title.Render("⚙️  Settings")
+	title := m.styles.Title.Render("settings")
 	b.WriteString(title)
-	b.WriteString("\n\n")
-
-	desc := m.styles.Description.Render("Configure your Tinker CLI preferences")
-	b.WriteString(desc)
 	b.WriteString("\n\n")
 
 	// Settings items
 	items := []struct {
-		icon   string
 		title  string
 		status string
 	}{
-		{"🔑", "API Key", m.getAPIKeyStatus()},
-		{"🌐", "Bridge Server URL", config.GetBridgeURL()},
-		{"←", "Back to Menu", ""},
+		{"api key", m.getAPIKeyStatus()},
+		{"bridge url", config.GetBridgeURL()},
+		{"← back", ""},
 	}
 
 	for i, item := range items {
 		cursor := "  "
 		if i == m.settingsCursor {
-			cursor = lipgloss.NewStyle().Foreground(ui.ColorPrimary).Render("▸ ")
+			cursor = lipgloss.NewStyle().Foreground(ui.ColorPrimary).Render("› ")
 		}
 
-		titleStyle := lipgloss.NewStyle().Bold(true)
+		titleStyle := lipgloss.NewStyle()
 		if i == m.settingsCursor {
 			titleStyle = titleStyle.Foreground(ui.ColorPrimary)
+		} else {
+			titleStyle = titleStyle.Foreground(ui.ColorTextNormal)
 		}
 
-		line := fmt.Sprintf("%s%s %s", cursor, item.icon, titleStyle.Render(item.title))
-		b.WriteString(line)
-		b.WriteString("\n")
+		b.WriteString(cursor + titleStyle.Render(item.title))
 
 		if item.status != "" {
-			statusStyle := lipgloss.NewStyle().Foreground(ui.ColorTextMuted).PaddingLeft(5)
+			statusStyle := lipgloss.NewStyle().Foreground(ui.ColorTextDim)
 			if i == 0 && config.HasAPIKey() {
 				statusStyle = statusStyle.Foreground(ui.ColorSuccess)
-			} else if i == 0 {
-				statusStyle = statusStyle.Foreground(ui.ColorWarning)
 			}
-			b.WriteString(statusStyle.Render(item.status))
-			b.WriteString("\n")
+			b.WriteString("  " + statusStyle.Render(item.status))
 		}
 		b.WriteString("\n")
 	}
 
-	// Editing input
 	if m.settingsEditing {
+		b.WriteString("\n")
 		inputBox := lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
-			BorderForeground(ui.ColorPrimary).
+			BorderForeground(ui.ColorTextMuted).
 			Padding(0, 1).
 			Render(m.settingsInput.View())
 		b.WriteString(inputBox)
 		b.WriteString("\n")
-		hint := m.styles.Help.Render("enter to save • esc to cancel")
+		hint := m.styles.Help.Render("enter save · esc cancel")
 		b.WriteString(hint)
-		b.WriteString("\n")
 	}
 
-	// Message
 	if m.settingsMessage != "" {
-		b.WriteString("\n")
+		b.WriteString("\n\n")
 		msgStyle := lipgloss.NewStyle()
-		if strings.HasPrefix(m.settingsMessage, "✓") {
+		if m.settingsMessage == "saved" {
 			msgStyle = msgStyle.Foreground(ui.ColorSuccess)
 		} else {
 			msgStyle = msgStyle.Foreground(ui.ColorError)
 		}
-		msgBox := lipgloss.NewStyle().
-			Border(lipgloss.RoundedBorder()).
-			BorderForeground(ui.ColorSuccess).
-			Padding(0, 1).
-			Render(msgStyle.Render(m.settingsMessage))
-		b.WriteString(msgBox)
-		b.WriteString("\n")
+		b.WriteString(msgStyle.Render(m.settingsMessage))
 	}
 
-	// Help
-	b.WriteString("\n")
+	b.WriteString("\n\n")
 	var help string
 	if m.settingsEditing {
 		help = m.styles.RenderHelp("enter", "save", "esc", "cancel")
 	} else {
-		help = m.styles.RenderHelp("↑/↓", "navigate", "enter", "edit", "d", "delete key", "esc", "back")
+		help = m.styles.RenderHelp("↑↓", "navigate", "enter", "edit", "d", "delete", "esc", "back")
 	}
 	b.WriteString(m.styles.Help.Render(help))
 
@@ -1197,68 +1151,20 @@ func (m model) getAPIKeyStatus() string {
 	source := config.GetAPIKeySource()
 	switch source {
 	case "environment":
-		return "Set via environment variable"
+		return "env"
 	case "keyring":
 		if key, err := config.GetAPIKey(); err == nil {
-			return fmt.Sprintf("Stored securely: %s", config.MaskAPIKey(key))
+			return config.MaskAPIKey(key)
 		}
-		return "Stored in keyring"
+		return "keyring"
 	default:
-		return "Not configured"
+		return "not set"
 	}
 }
 
-func (m model) renderUsageStats() string {
-	if m.usageStats == nil {
-		return "No statistics available"
-	}
-
-	var b strings.Builder
-	labelStyle := lipgloss.NewStyle().Foreground(ui.ColorTextDim).Width(20)
-	valueStyle := lipgloss.NewStyle().Foreground(ui.ColorPrimary).Bold(true)
-
-	b.WriteString(labelStyle.Render("Training Runs:") + valueStyle.Render(fmt.Sprintf("%d", m.usageStats.TotalTrainingRuns)) + "\n")
-	b.WriteString(labelStyle.Render("Checkpoints:") + valueStyle.Render(fmt.Sprintf("%d", m.usageStats.TotalCheckpoints)) + "\n")
-	b.WriteString(labelStyle.Render("Compute Hours:") + valueStyle.Render(fmt.Sprintf("%.2f hrs", m.usageStats.ComputeHours)) + "\n")
-	b.WriteString(labelStyle.Render("Storage Used:") + valueStyle.Render(fmt.Sprintf("%.2f GB", m.usageStats.StorageGB)))
-
-	return b.String()
-}
-
-func (m *model) updateRunsTable() {
-	rows := make([]table.Row, len(m.runs))
-	for i, run := range m.runs {
-		loraStr := "No"
-		if run.IsLoRA {
-			loraStr = "Yes"
-			if run.LoRAConfig != nil {
-				loraStr = fmt.Sprintf("r%d", run.LoRAConfig.Rank)
-			}
-		}
-		created := "N/A"
-		if !run.CreatedAt.IsZero() {
-			created = run.CreatedAt.Format("2006-01-02 15:04")
-		}
-		status := run.Status
-		if status == "" {
-			status = "unknown"
-		}
-		rows[i] = table.Row{
-			truncate(run.ID, 20),
-			truncate(run.BaseModel, 30),
-			loraStr,
-			status,
-			created,
-		}
-	}
-	m.runsTable.SetRows(rows)
-}
-
-// rebuildTreeItems rebuilds the flattened tree items list based on expanded state
 func (m *model) rebuildTreeItems() {
 	m.treeItems = nil
 	for runIdx, run := range m.runs {
-		// Add the run item
 		m.treeItems = append(m.treeItems, treeItem{
 			isRun:    true,
 			runIndex: runIdx,
@@ -1266,7 +1172,6 @@ func (m *model) rebuildTreeItems() {
 			depth:    0,
 		})
 
-		// If expanded, add checkpoint items
 		if m.expandedRuns[run.ID] {
 			for cpIdx := range run.Checkpoints {
 				m.treeItems = append(m.treeItems, treeItem{
@@ -1279,7 +1184,6 @@ func (m *model) rebuildTreeItems() {
 		}
 	}
 
-	// Ensure cursor is in bounds
 	if m.treeCursor >= len(m.treeItems) {
 		m.treeCursor = len(m.treeItems) - 1
 	}
@@ -1288,9 +1192,8 @@ func (m *model) rebuildTreeItems() {
 	}
 }
 
-// ensureTreeVisible adjusts scroll offset to keep cursor visible
 func (m *model) ensureTreeVisible() {
-	visibleLines := m.height - 18 // Account for header, footer, etc.
+	visibleLines := m.height - 14
 	if visibleLines < 5 {
 		visibleLines = 5
 	}
@@ -1303,40 +1206,28 @@ func (m *model) ensureTreeVisible() {
 	}
 }
 
-func (m *model) updateCheckpointsTable() {
-	rows := make([]table.Row, len(m.checkpoints))
-	for i, cp := range m.checkpoints {
-		published := "No"
-		if cp.IsPublished {
-			published = "Yes"
-		}
-		created := "N/A"
-		if !cp.CreatedAt.IsZero() {
-			created = cp.CreatedAt.Format("2006-01-02 15:04")
-		}
-		cpType := cp.Type
-		if cpType == "" {
-			cpType = "unknown"
-		}
-		rows[i] = table.Row{
-			truncate(cp.Name, 20),
-			cpType,
-			truncate(cp.TrainingRunID, 20),
-			published,
-			created,
-		}
+func (m *model) ensureCpVisible() {
+	visibleLines := m.height - 12
+	if visibleLines < 5 {
+		visibleLines = 5
 	}
-	m.checkpointsTable.SetRows(rows)
+
+	if m.cpCursor < m.cpScrollOffset {
+		m.cpScrollOffset = m.cpCursor
+	}
+	if m.cpCursor >= m.cpScrollOffset+visibleLines {
+		m.cpScrollOffset = m.cpCursor - visibleLines + 1
+	}
 }
 
 func truncate(s string, maxLen int) string {
 	if len(s) <= maxLen {
 		return s
 	}
-	if maxLen <= 3 {
+	if maxLen <= 2 {
 		return s[:maxLen]
 	}
-	return s[:maxLen-3] + "..."
+	return s[:maxLen-1] + "…"
 }
 
 // Menu delegate for custom rendering
@@ -1349,7 +1240,7 @@ func newMenuDelegate(styles *ui.Styles) menuDelegate {
 }
 
 func (d menuDelegate) Height() int                             { return 2 }
-func (d menuDelegate) Spacing() int                            { return 1 }
+func (d menuDelegate) Spacing() int                            { return 0 }
 func (d menuDelegate) Update(_ tea.Msg, _ *list.Model) tea.Cmd { return nil }
 
 func (d menuDelegate) Render(w io.Writer, m list.Model, index int, item list.Item) {
@@ -1359,24 +1250,28 @@ func (d menuDelegate) Render(w io.Writer, m list.Model, index int, item list.Ite
 	}
 
 	isSelected := index == m.Index()
-	var title, desc string
 
+	cursor := "  "
 	if isSelected {
-		title = d.styles.MenuItemSelected.Render(fmt.Sprintf(" %s %s", mi.icon, mi.title))
-		desc = lipgloss.NewStyle().Foreground(ui.ColorPrimary).PaddingLeft(4).Render(mi.desc)
-	} else {
-		title = d.styles.MenuItem.Render(fmt.Sprintf(" %s %s", mi.icon, mi.title))
-		desc = lipgloss.NewStyle().Foreground(ui.ColorTextDim).PaddingLeft(4).Render(mi.desc)
+		cursor = lipgloss.NewStyle().Foreground(ui.ColorPrimary).Render("› ")
 	}
 
-	fmt.Fprintf(w, "%s\n%s", title, desc)
+	var title, desc string
+	if isSelected {
+		title = lipgloss.NewStyle().Foreground(ui.ColorPrimary).Bold(true).Render(mi.title)
+		desc = lipgloss.NewStyle().Foreground(ui.ColorTextDim).PaddingLeft(2).Render(mi.desc)
+	} else {
+		title = lipgloss.NewStyle().Foreground(ui.ColorTextNormal).Render(mi.title)
+		desc = lipgloss.NewStyle().Foreground(ui.ColorTextMuted).PaddingLeft(2).Render(mi.desc)
+	}
+
+	fmt.Fprintf(w, "%s%s\n%s", cursor, title, desc)
 }
 
 func main() {
 	p := tea.NewProgram(initialModel(), tea.WithAltScreen())
 	if _, err := p.Run(); err != nil {
-		fmt.Printf("Error running program: %v\n", err)
+		fmt.Printf("error: %v\n", err)
 		os.Exit(1)
 	}
 }
-
