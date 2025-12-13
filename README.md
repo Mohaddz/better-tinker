@@ -188,14 +188,9 @@ better-tinker
 
 ```
 better-tinker/
-├── main.go                 # Go CLI entry point
+├── main.go                 # Go CLI entry point (thin wrapper around internal/tui)
 ├── better_tinker/
 │   ├── wrapper.py          # Python wrapper (starts bridge + Go CLI)
-│   ├── bin/                # Pre-built Go binaries
-│   │   ├── tinker-cli-windows.exe
-│   │   ├── tinker-cli-linux
-│   │   ├── tinker-cli-darwin
-│   │   └── tinker-cli-darwin-arm64
 │   └── bridge/
 │       └── server.py       # FastAPI bridge server
 ├── internal/
@@ -203,11 +198,19 @@ better-tinker/
 │   │   ├── client.go       # REST API client (calls bridge)
 │   │   └── types.go        # API response types
 │   ├── config/
-│   │   └── config.go       # Configuration management
+│   │   └── config.go       # Configuration / credential storage
+│   ├── tui/
+│   │   ├── program.go      # Bubble Tea program wiring
+│   │   ├── model.go        # App state + initial model
+│   │   ├── update.go       # Update loop + navigation logic
+│   │   ├── views.go        # View rendering
+│   │   ├── commands.go     # Async commands (API calls)
+│   │   ├── types.go        # Msg/types used by the TUI
+│   │   ├── layout.go       # Layout helpers
+│   │   ├── util.go         # Small helpers
+│   │   └── menu_delegate.go # Custom menu renderer
 │   └── ui/
-│       ├── app.go          # Bubble Tea app model
 │       ├── styles.go       # Lip Gloss styles
-│       └── views/          # UI views
 ├── build_binaries.py       # Cross-compilation script
 ├── pyproject.toml          # Python package config
 └── go.mod                  # Go module config

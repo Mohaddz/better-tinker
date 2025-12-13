@@ -8,19 +8,16 @@ import (
 	"strings"
 )
 
-// Config holds the application configuration
-type Config struct {
-	APIKey    string
-	BridgeURL string
-}
-
-// ConfigFile represents the JSON config file structure
 type ConfigFile struct {
 	APIKey    string `json:"api_key,omitempty"`
 	BridgeURL string `json:"bridge_url,omitempty"`
 }
 
 func getConfigDir() string {
+	if os.Getenv("APPDATA") != "" {
+		return filepath.Join(os.Getenv("APPDATA"), "tinker-cli")
+	}
+
 	if xdgConfig := os.Getenv("XDG_CONFIG_HOME"); xdgConfig != "" {
 		return filepath.Join(xdgConfig, "tinker-cli")
 	}
@@ -29,22 +26,22 @@ func getConfigDir() string {
 	if err != nil {
 		return ""
 	}
-
-	if os.Getenv("APPDATA") != "" {
-		return filepath.Join(os.Getenv("APPDATA"), "tinker-cli")
-	}
-
 	return filepath.Join(home, ".config", "tinker-cli")
 }
 
-// getConfigFilePath returns the full path to the config file
 func getConfigFilePath() string {
-	return filepath.Join(getConfigDir(), "config.json")
+	dir := getConfigDir()
+	if dir == "" {
+		return ""
+	}
+	return filepath.Join(dir, "config.json")
 }
 
-// loadConfigFile loads configuration from the JSON file
 func loadConfigFile() (*ConfigFile, error) {
 	path := getConfigFilePath()
+	if path == "" {
+		return nil, fmt.Errorf("could not determine config directory")
+	}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -60,7 +57,6 @@ func loadConfigFile() (*ConfigFile, error) {
 	return &cfg, nil
 }
 
-// saveConfigFile saves configuration to the JSON file
 func saveConfigFile(cfg *ConfigFile) error {
 	dir := getConfigDir()
 	if dir == "" {
@@ -77,29 +73,15 @@ func saveConfigFile(cfg *ConfigFile) error {
 	}
 
 	configPath := getConfigFilePath()
-	file, err := os.OpenFile(configPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
-	if err != nil {
-		return fmt.Errorf("failed to create config file: %w", err)
+	if configPath == "" {
+		return fmt.Errorf("could not determine config file path")
 	}
-
-	if _, err := file.Write(data); err != nil {
-		file.Close()
+	if err := os.WriteFile(configPath, data, 0600); err != nil {
 		return fmt.Errorf("failed to write config file: %w", err)
 	}
-
-	if err := file.Sync(); err != nil {
-		file.Close()
-		return fmt.Errorf("failed to sync config file: %w", err)
-	}
-
-	if err := file.Close(); err != nil {
-		return fmt.Errorf("failed to close config file: %w", err)
-	}
-
 	return nil
 }
 
-// GetAPIKey retrieves the API key from environment or config file
 func GetAPIKey() (string, error) {
 	if key := os.Getenv("TINKER_API_KEY"); key != "" {
 		return key, nil
@@ -113,7 +95,6 @@ func GetAPIKey() (string, error) {
 	return "", fmt.Errorf("API key not configured. Set it in Settings or via TINKER_API_KEY environment variable")
 }
 
-// SetAPIKey stores the API key in the config file
 func SetAPIKey(key string) error {
 	key = strings.TrimSpace(key)
 	if key == "" {
@@ -134,17 +115,18 @@ func SetAPIKey(key string) error {
 	return nil
 }
 
-// DeleteAPIKey removes the API key from config file
 func DeleteAPIKey() error {
 	cfg, _ := loadConfigFile()
-	if cfg != nil {
-		cfg.APIKey = ""
-		saveConfigFile(cfg)
+	if cfg == nil {
+		cfg = &ConfigFile{}
+	}
+	cfg.APIKey = ""
+	if err := saveConfigFile(cfg); err != nil {
+		return fmt.Errorf("failed to delete API key: %w", err)
 	}
 	return nil
 }
 
-// HasAPIKey checks if an API key is configured
 func HasAPIKey() bool {
 	if os.Getenv("TINKER_API_KEY") != "" {
 		return true
@@ -154,7 +136,6 @@ func HasAPIKey() bool {
 	return err == nil && cfg.APIKey != ""
 }
 
-// GetAPIKeySource returns where the API key is configured
 func GetAPIKeySource() string {
 	if os.Getenv("TINKER_API_KEY") != "" {
 		return "environment"
@@ -168,7 +149,6 @@ func GetAPIKeySource() string {
 	return "not configured"
 }
 
-// GetBridgeURL retrieves the bridge URL from environment or config file
 func GetBridgeURL() string {
 	if url := os.Getenv("TINKER_BRIDGE_URL"); url != "" {
 		return url
@@ -182,7 +162,6 @@ func GetBridgeURL() string {
 	return "http://127.0.0.1:8765"
 }
 
-// SetBridgeURL stores the bridge URL in the config file
 func SetBridgeURL(url string) error {
 	url = strings.TrimSpace(url)
 	if url == "" {
@@ -203,26 +182,9 @@ func SetBridgeURL(url string) error {
 	return nil
 }
 
-// MaskAPIKey returns a masked version of the API key for display
 func MaskAPIKey(key string) string {
 	if len(key) <= 8 {
 		return strings.Repeat("•", len(key))
 	}
 	return key[:4] + strings.Repeat("•", len(key)-8) + key[len(key)-4:]
-}
-
-// LoadConfig loads all configuration
-func LoadConfig() (*Config, error) {
-	apiKey, _ := GetAPIKey()
-	bridgeURL := GetBridgeURL()
-
-	return &Config{
-		APIKey:    apiKey,
-		BridgeURL: bridgeURL,
-	}, nil
-}
-
-// GetConfigFilePath returns the config file path (exported for display in UI)
-func GetConfigFilePath() string {
-	return getConfigFilePath()
 }
