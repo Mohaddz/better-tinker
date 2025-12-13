@@ -1,3 +1,43 @@
 .pypirc
-.cursor
-cursor_implement_cursor_plans_with_cont.md
+
+# --- Cursor/IDE ---
+.cursor/
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+.tox/
+.nox/
+.venv/
+venv/
+ENV/
+env/
+.env
+.env.*
+pip-wheel-metadata/
+*.egg-info/
+build/
+dist/
+
+# --- Go ---
+*.test
+*.out
+
+# --- Project-specific generated outputs ---
+tinker-cli
+tinker-cli.exe
+tinker-cli.exe~
+
+# Don’t track the shipped binaries in git (we’ll add them during release builds)
+better_tinker/bin/

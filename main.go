@@ -174,8 +174,10 @@ type actionCompleteMsg struct {
 }
 
 type settingsSavedMsg struct {
-	success bool
-	err     error
+	success  bool
+	err      error
+	value    string // The value that was saved (for API key, used to create client directly)
+	isAPIKey bool   // Whether this was an API key save (vs bridge URL)
 }
 
 type runCheckpointsLoadedMsg struct {
@@ -289,21 +291,21 @@ func deleteRunCheckpoint(client *api.Client, path, runID string) tea.Cmd {
 func saveAPIKey(key string) tea.Cmd {
 	return func() tea.Msg {
 		err := config.SetAPIKey(key)
-		return settingsSavedMsg{success: err == nil, err: err}
+		return settingsSavedMsg{success: err == nil, err: err, value: key, isAPIKey: true}
 	}
 }
 
 func saveBridgeURL(url string) tea.Cmd {
 	return func() tea.Msg {
 		err := config.SetBridgeURL(url)
-		return settingsSavedMsg{success: err == nil, err: err}
+		return settingsSavedMsg{success: err == nil, err: err, value: url, isAPIKey: false}
 	}
 }
 
 func deleteAPIKey() tea.Cmd {
 	return func() tea.Msg {
 		err := config.DeleteAPIKey()
-		return settingsSavedMsg{success: err == nil, err: err}
+		return settingsSavedMsg{success: err == nil, err: err, value: "", isAPIKey: true}
 	}
 }
 
@@ -395,10 +397,22 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.settingsMessage = fmt.Sprintf("error: %s", msg.err)
 		} else {
 			m.settingsMessage = "saved"
-			if client, err := api.NewClient(); err == nil {
-				m.client = client
-				m.connected = true
-				m.err = nil
+			// Create client directly with the saved value to avoid file read timing issues on Windows
+			if msg.isAPIKey {
+				if msg.value != "" {
+					m.client = api.NewClientWithKey(msg.value)
+					m.connected = true
+					m.err = nil
+				} else {
+					m.client = nil
+					m.connected = false
+				}
+			} else {
+				if client, err := api.NewClient(); err == nil {
+					m.client = client
+					m.connected = true
+					m.err = nil
+				}
 			}
 		}
 		return m, nil
@@ -1152,11 +1166,11 @@ func (m model) getAPIKeyStatus() string {
 	switch source {
 	case "environment":
 		return "env"
-	case "keyring":
+	case "config":
 		if key, err := config.GetAPIKey(); err == nil {
 			return config.MaskAPIKey(key)
 		}
-		return "keyring"
+		return "config"
 	default:
 		return "not set"
 	}

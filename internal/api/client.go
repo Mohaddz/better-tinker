@@ -24,7 +24,6 @@ type Client struct {
 }
 
 // NewClient creates a new Tinker API client
-// It reads the API key from environment variable or system keyring
 func NewClient() (*Client, error) {
 	apiKey, err := config.GetAPIKey()
 	if err != nil {
@@ -98,7 +97,7 @@ func (c *Client) CheckBridgeHealth() error {
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("bridge server not running at %s - please start it with: python bridge/server.py", c.baseURL)
+		return fmt.Errorf("bridge server not running at %s - start it with: python -m better_tinker.bridge.server (or run: tinker-bridge)", c.baseURL)
 	}
 	defer resp.Body.Close()
 

@@ -1,14 +1,11 @@
 """
 Tinker Bridge Server - REST API bridge for Tinker Python SDK
 
-This FastAPI server provides a REST API that wraps the Tinker Python SDK,
-allowing the Go CLI to interact with Tinker services.
+This FastAPI server wraps the Tinker Python SDK, providing a REST API
+for the Go CLI to interact with Tinker services.
 
-API Key Flow:
-1. Go CLI reads API key from keyring/env (single access)
-2. Go CLI passes API key to bridge via Authorization header
-3. Bridge uses the API key from header (NO second keyring access)
-4. This eliminates double password prompts on macOS
+The Go CLI passes the API key via Authorization header. The bridge uses
+this key to initialize the Tinker SDK client.
 """
 
 import os
@@ -87,11 +84,6 @@ class CheckpointActionResponse(BaseModel):
     success: bool
 
 
-# Legacy aliases for backwards compatibility
-PublishRequest = CheckpointActionRequest
-PublishResponse = CheckpointActionResponse
-
-
 class UsageStats(BaseModel):
     total_training_runs: int
     total_checkpoints: int
@@ -99,22 +91,12 @@ class UsageStats(BaseModel):
     storage_gb: float
 
 
-class ErrorResponse(BaseModel):
-    error: str
-    message: str
-    code: int
-
-
 # ============================================================================
 # Client Manager - Thread-safe client caching per API key
 # ============================================================================
 
 class TinkerClientManager:
-    """
-    Manages Tinker SDK clients, caching them per API key.
-    This avoids re-initializing the SDK for every request while still
-    supporting multiple API keys (useful for testing).
-    """
+    """Caches Tinker SDK clients per API key to avoid re-initialization."""
     
     def __init__(self):
         self._clients: Dict[str, tuple] = {}  # api_key -> (service_client, rest_client)
@@ -129,20 +111,11 @@ class TinkerClientManager:
             if api_key in self._clients:
                 return self._clients[api_key]
             
-            # Create new client
             try:
-                # Set the API key in environment for Tinker SDK
-                old_key = os.environ.get("TINKER_API_KEY")
                 os.environ["TINKER_API_KEY"] = api_key
                 
                 service_client = tinker.ServiceClient()
                 rest_client = service_client.create_rest_client()
-                
-                # Restore old key if any
-                if old_key:
-                    os.environ["TINKER_API_KEY"] = old_key
-                else:
-                    del os.environ["TINKER_API_KEY"]
                 
                 self._clients[api_key] = (service_client, rest_client)
                 return service_client, rest_client
@@ -156,7 +129,6 @@ class TinkerClientManager:
             self._clients.clear()
 
 
-# Global client manager
 client_manager = TinkerClientManager()
 
 
@@ -166,16 +138,10 @@ client_manager = TinkerClientManager()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """App lifespan - minimal startup, clients created on-demand."""
-    if TINKER_AVAILABLE:
-        print("✓ Tinker SDK available")
-        print("ℹ Clients will be created on-demand from Authorization header")
-    else:
+    """App lifespan handler."""
+    if not TINKER_AVAILABLE:
         print("⚠ Running in mock mode (tinker SDK not installed)")
-    
     yield
-    
-    # Cleanup
     client_manager.clear()
 
 
@@ -186,7 +152,6 @@ app = FastAPI(
     lifespan=lifespan
 )
 
-# Add CORS middleware for local development
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -201,27 +166,17 @@ app.add_middleware(
 # ============================================================================
 
 def extract_api_key(request: Request) -> Optional[str]:
-    """
-    Extract API key from Authorization header.
-    
-    The Go CLI sends: Authorization: Bearer <api_key>
-    This eliminates the need for the bridge to access the keyring,
-    preventing the second password prompt on macOS.
-    """
+    """Extract API key from Authorization header or environment variable."""
     auth_header = request.headers.get("Authorization", "")
     
     if auth_header.startswith("Bearer "):
-        return auth_header[7:]  # Remove "Bearer " prefix
+        return auth_header[7:]
     
-    # Fallback to environment variable (for standalone bridge usage)
     return os.environ.get("TINKER_API_KEY")
 
 
 def get_rest_client(request: Request):
-    """
-    Dependency that provides a Tinker REST client.
-    Creates/retrieves client based on API key from Authorization header.
-    """
+    """FastAPI dependency that provides a Tinker REST client."""
     if not TINKER_AVAILABLE:
         raise HTTPException(
             status_code=503,
@@ -233,8 +188,7 @@ def get_rest_client(request: Request):
     if not api_key:
         raise HTTPException(
             status_code=401,
-            detail="API key required. The Go CLI should pass it via Authorization header, "
-                   "or set TINKER_API_KEY environment variable for standalone usage."
+            detail="API key required. Pass via Authorization header or set TINKER_API_KEY env var."
         )
     
     _, rest_client = client_manager.get_client(api_key)
@@ -497,19 +451,14 @@ def main():
     host = os.environ.get("TINKER_BRIDGE_HOST", "127.0.0.1")
     
     print(f"""
-╔══════════════════════════════════════════════════════════════════╗
-║                    Tinker Bridge Server v2.0                      ║
-╠══════════════════════════════════════════════════════════════════╣
-║  Starting server at http://{host}:{port:<5}                          ║
-║  API docs available at http://{host}:{port}/docs                  ║
-║                                                                   ║
-║  API Key Flow:                                                    ║
-║  • Go CLI reads key from keyring → sends via Authorization header ║
-║  • Bridge uses key from header → NO second keyring access         ║
-║  • This eliminates double password prompts on macOS!              ║
-║                                                                   ║
-║  For standalone usage: set TINKER_API_KEY environment variable    ║
-╚══════════════════════════════════════════════════════════════════╝
+╔═══════════════════════════════════════════════════════════╗
+║              Tinker Bridge Server v2.0                    ║
+╠═══════════════════════════════════════════════════════════╣
+║  Server: http://{host}:{port:<5}                             ║
+║  Docs:   http://{host}:{port}/docs                        ║
+║                                                           ║
+║  Standalone: set TINKER_API_KEY environment variable      ║
+╚═══════════════════════════════════════════════════════════╝
 """)
     
     uvicorn.run(app, host=host, port=port)

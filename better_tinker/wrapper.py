@@ -30,9 +30,6 @@ def start_bridge():
     """Start the bridge server as a background process."""
     global _bridge_process
     
-    # Get the path to the bridge server module
-    bridge_module = "better_tinker.bridge.server"
-    
     # Start bridge with output suppressed
     _bridge_process = subprocess.Popen(
         [sys.executable, "-m", "uvicorn", 

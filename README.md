@@ -11,9 +11,8 @@ A beautiful terminal interface for the Tinker API, built with [Bubble Tea](https
 - 🚀 **Training Runs** - View and manage your training runs with expandable tree view
 - 💾 **Checkpoints** - Browse, publish/unpublish, and delete model checkpoints  
 - 📊 **Usage Statistics** - View your API usage and quotas
-- ⚙️ **Settings** - Configure API key with secure storage (OS keyring)
+- ⚙️ **Settings** - Configure API key (stored in local config file)
 - ✨ **Interactive UI** - Beautiful dark theme with keyboard navigation
-- 🔐 **Secure Credential Storage** - API keys stored in Windows Credential Manager / macOS Keychain / Linux Secret Service
 
 ## Quick Start
 
@@ -46,14 +45,8 @@ This CLI uses a **Python bridge server** to communicate with the Tinker API. The
 ┌─────────────┐   Authorization Header   ┌─────────────────┐     gRPC-Web    ┌─────────────┐
 │  Go CLI     │ ────────────────────────► │  Python Bridge  │ ──────────────► │ Tinker API  │
 │ (Bubble Tea)│   Bearer <api_key>       │    (FastAPI)    │                 │             │
-│             │                          │                 │                 │             │
-│ Reads key   │                          │ Uses key from   │                 │             │
-│ from keyring│                          │ header (no      │                 │             │
-│ (1 prompt)  │                          │ keyring access) │                 │             │
 └─────────────┘                          └─────────────────┘                 └─────────────┘
 ```
-
-**Key Design Decision:** The Go CLI is the only component that accesses the system keyring. The API key is passed to the bridge via HTTP Authorization header, eliminating the double password prompt issue on macOS.
 
 ## Configuration
 
@@ -64,10 +57,9 @@ The easiest way to configure your API key is through the CLI itself:
 1. Run `better-tinker`
 2. Select **Settings** from the menu
 3. Select **API Key** and enter your key
-4. The key will be stored securely in your OS keyring:
-   - **Windows**: Credential Manager
-   - **macOS**: Keychain
-   - **Linux**: Secret Service (GNOME Keyring, KWallet, etc.)
+4. The key is stored in a local config file:
+   - **Windows**: `%APPDATA%\tinker-cli\config.json`
+   - **macOS/Linux**: `~/.config/tinker-cli/config.json`
 
 ### Option 2: Environment Variable
 
@@ -105,24 +97,6 @@ source ~/.zshrc
 Add-Content $PROFILE 'setx TINKER_API_KEY "your-api-key-here"'
 ```
 
-## Platform-Specific Notes
-
-### macOS
-
-- **Keychain Access**: The first time you run `better-tinker`, macOS may prompt for your password to allow keychain access. Click "Always Allow" to avoid future prompts.
-- **Unsigned Binary Warning**: If macOS blocks the binary, go to System Preferences > Security & Privacy and click "Open Anyway"
-- **Code Signing**: The binaries are ad-hoc signed to reduce Keychain prompts
-
-### Windows
-
-- **Credential Manager**: API keys are stored in Windows Credential Manager under `tinker-cli:api-key`
-- **Firewall**: The bridge server runs on `127.0.0.1:8765`. Windows Firewall may ask to allow it (this is local-only traffic)
-
-### Linux
-
-- **Secret Service**: Requires a running secret service daemon (GNOME Keyring, KWallet, etc.)
-- **Headless Servers**: On servers without a desktop environment, use the `TINKER_API_KEY` environment variable instead
-
 ## Keyboard Controls
 
 | Key | Action |
@@ -141,7 +115,7 @@ Add-Content $PROFILE 'setx TINKER_API_KEY "your-api-key-here"'
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `TINKER_API_KEY` | Your Tinker API key | (from keyring) |
+| `TINKER_API_KEY` | Your Tinker API key | (from config) |
 | `TINKER_BRIDGE_URL` | Custom bridge server URL | `http://127.0.0.1:8765` |
 | `TINKER_BRIDGE_PORT` | Bridge server port | `8765` |
 | `TINKER_BRIDGE_HOST` | Bridge server host | `127.0.0.1` |
@@ -184,17 +158,6 @@ The bridge should start automatically. If it fails:
 2. Try manually starting the bridge:
    ```bash
    python -m better_tinker.bridge.server
-   ```
-
-### Double password prompt on macOS
-
-This issue has been fixed in v0.2.0+. If you still experience it:
-
-1. Update to the latest version: `uvx --refresh better-tinker`
-2. Use environment variable instead of keyring:
-   ```bash
-   export TINKER_API_KEY="your-key"
-   uvx better-tinker
    ```
 
 ### API Documentation
@@ -240,7 +203,7 @@ better-tinker/
 │   │   ├── client.go       # REST API client (calls bridge)
 │   │   └── types.go        # API response types
 │   ├── config/
-│   │   └── keyring.go      # Secure credential storage
+│   │   └── config.go       # Configuration management
 │   └── ui/
 │       ├── app.go          # Bubble Tea app model
 │       ├── styles.go       # Lip Gloss styles
@@ -256,7 +219,6 @@ better-tinker/
 - **TUI Framework**: [Bubble Tea](https://github.com/charmbracelet/bubbletea)
 - **Components**: [Bubbles](https://github.com/charmbracelet/bubbles)
 - **Styling**: [Lip Gloss](https://github.com/charmbracelet/lipgloss)
-- **Credential Storage**: [go-keyring](https://github.com/zalando/go-keyring)
 
 ### Python Bridge
 - **Web Framework**: [FastAPI](https://fastapi.tiangolo.com/)

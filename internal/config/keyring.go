@@ -1,20 +1,11 @@
 package config
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
-
-	"github.com/zalando/go-keyring"
-)
-
-const (
-	// ServiceName is the service name used in the keyring
-	ServiceName = "tinker-cli"
-	// APIKeyUser is the username for the API key credential
-	APIKeyUser = "api-key"
-	// BridgeURLUser is the username for the bridge URL credential
-	BridgeURLUser = "bridge-url"
 )
 
 // Config holds the application configuration
@@ -23,61 +14,144 @@ type Config struct {
 	BridgeURL string
 }
 
-// GetAPIKey retrieves the API key from environment or keyring
-// Priority: 1. Environment variable, 2. Keyring
+// ConfigFile represents the JSON config file structure
+type ConfigFile struct {
+	APIKey    string `json:"api_key,omitempty"`
+	BridgeURL string `json:"bridge_url,omitempty"`
+}
+
+func getConfigDir() string {
+	if xdgConfig := os.Getenv("XDG_CONFIG_HOME"); xdgConfig != "" {
+		return filepath.Join(xdgConfig, "tinker-cli")
+	}
+
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+
+	if os.Getenv("APPDATA") != "" {
+		return filepath.Join(os.Getenv("APPDATA"), "tinker-cli")
+	}
+
+	return filepath.Join(home, ".config", "tinker-cli")
+}
+
+// getConfigFilePath returns the full path to the config file
+func getConfigFilePath() string {
+	return filepath.Join(getConfigDir(), "config.json")
+}
+
+// loadConfigFile loads configuration from the JSON file
+func loadConfigFile() (*ConfigFile, error) {
+	path := getConfigFilePath()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return &ConfigFile{}, nil
+		}
+		return nil, err
+	}
+
+	var cfg ConfigFile
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return nil, err
+	}
+	return &cfg, nil
+}
+
+// saveConfigFile saves configuration to the JSON file
+func saveConfigFile(cfg *ConfigFile) error {
+	dir := getConfigDir()
+	if dir == "" {
+		return fmt.Errorf("could not determine config directory")
+	}
+
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return fmt.Errorf("failed to create config directory: %w", err)
+	}
+
+	data, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to marshal config: %w", err)
+	}
+
+	configPath := getConfigFilePath()
+	file, err := os.OpenFile(configPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
+	if err != nil {
+		return fmt.Errorf("failed to create config file: %w", err)
+	}
+
+	if _, err := file.Write(data); err != nil {
+		file.Close()
+		return fmt.Errorf("failed to write config file: %w", err)
+	}
+
+	if err := file.Sync(); err != nil {
+		file.Close()
+		return fmt.Errorf("failed to sync config file: %w", err)
+	}
+
+	if err := file.Close(); err != nil {
+		return fmt.Errorf("failed to close config file: %w", err)
+	}
+
+	return nil
+}
+
+// GetAPIKey retrieves the API key from environment or config file
 func GetAPIKey() (string, error) {
-	// First check environment variable
 	if key := os.Getenv("TINKER_API_KEY"); key != "" {
 		return key, nil
 	}
 
-	// Then check keyring
-	key, err := keyring.Get(ServiceName, APIKeyUser)
-	if err != nil {
-		if err == keyring.ErrNotFound {
-			return "", fmt.Errorf("API key not configured. Please set it in Settings or via TINKER_API_KEY environment variable")
-		}
-		return "", fmt.Errorf("failed to retrieve API key from keyring: %w", err)
+	cfg, err := loadConfigFile()
+	if err == nil && cfg.APIKey != "" {
+		return cfg.APIKey, nil
 	}
 
-	return key, nil
+	return "", fmt.Errorf("API key not configured. Set it in Settings or via TINKER_API_KEY environment variable")
 }
 
-// SetAPIKey stores the API key in the system keyring
+// SetAPIKey stores the API key in the config file
 func SetAPIKey(key string) error {
 	key = strings.TrimSpace(key)
 	if key == "" {
 		return fmt.Errorf("API key cannot be empty")
 	}
 
-	err := keyring.Set(ServiceName, APIKeyUser, key)
-	if err != nil {
-		return fmt.Errorf("failed to store API key in keyring: %w", err)
+	cfg, _ := loadConfigFile()
+	if cfg == nil {
+		cfg = &ConfigFile{}
+	}
+
+	cfg.APIKey = key
+
+	if err := saveConfigFile(cfg); err != nil {
+		return fmt.Errorf("failed to save API key: %w", err)
 	}
 
 	return nil
 }
 
-// DeleteAPIKey removes the API key from the keyring
+// DeleteAPIKey removes the API key from config file
 func DeleteAPIKey() error {
-	err := keyring.Delete(ServiceName, APIKeyUser)
-	if err != nil {
-		if err == keyring.ErrNotFound {
-			return nil // Already deleted or never existed
-		}
-		return fmt.Errorf("failed to delete API key from keyring: %w", err)
+	cfg, _ := loadConfigFile()
+	if cfg != nil {
+		cfg.APIKey = ""
+		saveConfigFile(cfg)
 	}
 	return nil
 }
 
-// HasAPIKey checks if an API key is configured (env or keyring)
+// HasAPIKey checks if an API key is configured
 func HasAPIKey() bool {
 	if os.Getenv("TINKER_API_KEY") != "" {
 		return true
 	}
 
-	_, err := keyring.Get(ServiceName, APIKeyUser)
-	return err == nil
+	cfg, err := loadConfigFile()
+	return err == nil && cfg.APIKey != ""
 }
 
 // GetAPIKeySource returns where the API key is configured
@@ -86,41 +160,44 @@ func GetAPIKeySource() string {
 		return "environment"
 	}
 
-	_, err := keyring.Get(ServiceName, APIKeyUser)
-	if err == nil {
-		return "keyring"
+	cfg, err := loadConfigFile()
+	if err == nil && cfg.APIKey != "" {
+		return "config"
 	}
 
 	return "not configured"
 }
 
-// GetBridgeURL retrieves the bridge URL from environment or keyring
+// GetBridgeURL retrieves the bridge URL from environment or config file
 func GetBridgeURL() string {
-	// First check environment variable
 	if url := os.Getenv("TINKER_BRIDGE_URL"); url != "" {
 		return url
 	}
 
-	// Then check keyring
-	url, err := keyring.Get(ServiceName, BridgeURLUser)
-	if err == nil && url != "" {
-		return url
+	cfg, err := loadConfigFile()
+	if err == nil && cfg.BridgeURL != "" {
+		return cfg.BridgeURL
 	}
 
-	// Default
 	return "http://127.0.0.1:8765"
 }
 
-// SetBridgeURL stores the bridge URL in the keyring
+// SetBridgeURL stores the bridge URL in the config file
 func SetBridgeURL(url string) error {
 	url = strings.TrimSpace(url)
 	if url == "" {
 		return fmt.Errorf("bridge URL cannot be empty")
 	}
 
-	err := keyring.Set(ServiceName, BridgeURLUser, url)
-	if err != nil {
-		return fmt.Errorf("failed to store bridge URL in keyring: %w", err)
+	cfg, _ := loadConfigFile()
+	if cfg == nil {
+		cfg = &ConfigFile{}
+	}
+
+	cfg.BridgeURL = url
+
+	if err := saveConfigFile(cfg); err != nil {
+		return fmt.Errorf("failed to save bridge URL: %w", err)
 	}
 
 	return nil
@@ -136,7 +213,7 @@ func MaskAPIKey(key string) string {
 
 // LoadConfig loads all configuration
 func LoadConfig() (*Config, error) {
-	apiKey, _ := GetAPIKey() // Don't error if not found
+	apiKey, _ := GetAPIKey()
 	bridgeURL := GetBridgeURL()
 
 	return &Config{
@@ -145,3 +222,7 @@ func LoadConfig() (*Config, error) {
 	}, nil
 }
 
+// GetConfigFilePath returns the config file path (exported for display in UI)
+func GetConfigFilePath() string {
+	return getConfigFilePath()
+}
