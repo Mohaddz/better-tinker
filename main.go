@@ -73,6 +73,10 @@ type model struct {
 	// Training runs tree view state
 	expandedRuns map[string]bool // Track which runs are expanded
 	loadingRuns  map[string]bool // Track which runs are loading checkpoints
+	runCpsLoaded map[string]bool // Track which runs have had checkpoints fetched (even if zero)
+	// Background prefetch (for showing checkpoint counts without expanding)
+	prefetchQueue []string
+	prefetching   map[string]bool // runs currently being prefetched
 	treeItems    []treeItem      // Flattened tree items for navigation
 	treeCursor   int             // Current cursor position in tree
 	scrollOffset int             // Scroll offset for tree view
@@ -100,6 +104,93 @@ type model struct {
 
 	// Styles
 	styles *ui.Styles
+}
+
+// appStyle returns the app container style sized to the terminal.
+// Bubble Tea may call View() before receiving a WindowSizeMsg, so guard zero widths.
+func (m model) appStyle() lipgloss.Style {
+	if m.width > 0 {
+		return m.styles.App.Width(m.width)
+	}
+	return m.styles.App
+}
+
+// innerHeight returns the usable content height inside the app padding.
+// styles.App uses Padding(1, 3) → 1 row top + 1 row bottom.
+func (m model) innerHeight() int {
+	if m.height <= 0 {
+		return 0
+	}
+	h := m.height - 2
+	if h < 0 {
+		return 0
+	}
+	return h
+}
+
+// contentWidth returns the usable content width inside the app padding.
+func (m model) contentWidth() int {
+	// styles.App uses Padding(1, 3) → 3 columns on each side.
+	if m.width <= 0 {
+		return 0
+	}
+	w := m.width - 6
+	if w < 0 {
+		return 0
+	}
+	return w
+}
+
+func textHeight(s string) int {
+	s = strings.TrimRight(s, "\n")
+	if s == "" {
+		return 0
+	}
+	return strings.Count(s, "\n") + 1
+}
+
+// renderWithFooter pins the footer to the bottom of the window by inserting
+// flexible blank space between body and footer. This keeps the help/options
+// line attached to the terminal bottom and responsive to resizing.
+func (m model) renderWithFooter(body, footer string) string {
+	body = strings.TrimRight(body, "\n")
+	footer = strings.TrimRight(footer, "\n")
+
+	innerH := m.innerHeight()
+	if innerH == 0 || footer == "" {
+		combined := body
+		if footer != "" {
+			if combined != "" {
+				combined += "\n"
+			}
+			combined += footer
+		}
+		return m.appStyle().Render(combined)
+	}
+
+	bodyH := textHeight(body)
+	footerH := textHeight(footer)
+	sepH := 0
+	if body != "" {
+		sepH = 1
+	}
+
+	filler := innerH - bodyH - sepH - footerH
+	if filler < 0 {
+		filler = 0
+	}
+
+	var b strings.Builder
+	if body != "" {
+		b.WriteString(body)
+		b.WriteString("\n")
+	}
+	if filler > 0 {
+		b.WriteString(strings.Repeat("\n", filler))
+	}
+	b.WriteString(footer)
+
+	return m.appStyle().Render(b.String())
 }
 
 // Initialize the model
@@ -147,6 +238,8 @@ func initialModel() model {
 		settingsInput: settingsInput,
 		expandedRuns:  make(map[string]bool),
 		loadingRuns:   make(map[string]bool),
+		runCpsLoaded:  make(map[string]bool),
+		prefetching:   make(map[string]bool),
 	}
 }
 
@@ -191,6 +284,34 @@ type runCheckpointActionMsg struct {
 	runID   string
 	success bool
 	err     error
+}
+
+// prefetchNextRunCheckpointsCmd fetches checkpoints for runs in the prefetch queue
+// sequentially to avoid spamming the API.
+func (m *model) prefetchNextRunCheckpointsCmd() tea.Cmd {
+	if m.client == nil {
+		return nil
+	}
+	for len(m.prefetchQueue) > 0 {
+		runID := m.prefetchQueue[0]
+
+		// Skip if already loaded or currently loading/prefetching.
+		if m.runCpsLoaded[runID] {
+			m.prefetchQueue = m.prefetchQueue[1:]
+			continue
+		}
+		if m.loadingRuns[runID] || m.prefetching[runID] {
+			// Don't drop it—just wait for the in-flight request to finish.
+			// IMPORTANT: do not "continue" here. Since runID comes from prefetchQueue[0],
+			// continuing would re-check the same run forever and hang the UI.
+			return nil
+		}
+
+		m.prefetchQueue = m.prefetchQueue[1:]
+		m.prefetching[runID] = true
+		return loadRunCheckpoints(m.client, runID)
+	}
+	return nil
 }
 
 // Commands
@@ -320,7 +441,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
-		m.menu.SetSize(msg.Width-6, msg.Height-12)
+		// Menu list size should account for app padding + header + footer.
+		menuW := msg.Width - 6
+		menuH := m.innerHeight() - (5 + 1) // header before menu (5 lines) + footer (1 line)
+		if menuW < 0 {
+			menuW = 0
+		}
+		if menuH < 0 {
+			menuH = 0
+		}
+		m.menu.SetSize(menuW, menuH)
 		return m, nil
 
 	case runsLoadedMsg:
@@ -328,24 +458,55 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err != nil {
 			m.err = msg.err
 		} else {
+			// We're about to replace m.runs with fresh data; invalidate any "loaded" flags
+			// tied to the previous slice so expanding/prefetching works every time.
+			m.runCpsLoaded = make(map[string]bool)
+			m.prefetching = make(map[string]bool)
+			m.prefetchQueue = nil
+			m.loadingRuns = make(map[string]bool)
+
 			m.runs = msg.runs
 			m.rebuildTreeItems()
+			// Prefetch checkpoints in the background so we can show counts without expanding.
+			// Limit to avoid too many requests (we load up to 50 runs).
+			const prefetchLimit = 15
+			m.prefetchQueue = nil
+			limit := len(m.runs)
+			if limit > prefetchLimit {
+				limit = prefetchLimit
+			}
+			for i := 0; i < limit; i++ {
+				m.prefetchQueue = append(m.prefetchQueue, m.runs[i].ID)
+			}
+			return m, (&m).prefetchNextRunCheckpointsCmd()
 		}
 		return m, nil
 
 	case runCheckpointsLoadedMsg:
+		_, wasPrefetch := m.prefetching[msg.runID]
+		delete(m.prefetching, msg.runID)
 		delete(m.loadingRuns, msg.runID)
 		if msg.err != nil {
 			m.statusMsg = fmt.Sprintf("error: %s", msg.err)
+			// If this was a background prefetch, stop the queue on error to avoid
+			// hammering the API if we're rate-limited or offline.
+			if wasPrefetch {
+				m.prefetchQueue = nil
+			}
 			return m, nil
 		}
 		for i := range m.runs {
 			if m.runs[i].ID == msg.runID {
 				m.runs[i].Checkpoints = msg.checkpoints
+				m.runCpsLoaded[msg.runID] = true
 				break
 			}
 		}
 		m.rebuildTreeItems()
+		// Continue background prefetch while we're on the runs screen.
+		if wasPrefetch && m.view == viewRuns {
+			return m, (&m).prefetchNextRunCheckpointsCmd()
+		}
 		return m, nil
 
 	case runCheckpointActionMsg:
@@ -498,6 +659,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.settingsMessage = ""
 					switch item.view {
 					case viewRuns:
+						// Reset runs state so prefetch/expand behaves consistently every time.
+						m.expandedRuns = make(map[string]bool)
+						m.loadingRuns = make(map[string]bool)
+						m.runCpsLoaded = make(map[string]bool)
+						m.prefetching = make(map[string]bool)
+						m.prefetchQueue = nil
+						m.treeCursor = 0
+						m.scrollOffset = 0
+
 						m.loading = true
 						return m, tea.Batch(m.spinner.Tick, loadRuns(m.client))
 					case viewCheckpoints:
@@ -559,6 +729,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				case viewRuns:
 					m.expandedRuns = make(map[string]bool)
 					m.loadingRuns = make(map[string]bool)
+					m.runCpsLoaded = make(map[string]bool)
+					m.prefetching = make(map[string]bool)
+					m.prefetchQueue = nil
 					return m, tea.Batch(m.spinner.Tick, loadRuns(m.client))
 				case viewCheckpoints:
 					return m, tea.Batch(m.spinner.Tick, loadCheckpoints(m.client))
@@ -633,10 +806,17 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 							delete(m.expandedRuns, run.ID)
 						} else {
 							m.expandedRuns[run.ID] = true
-							if len(run.Checkpoints) == 0 && !m.loadingRuns[run.ID] {
+							// If we haven't fetched checkpoints yet, fetch them now.
+							// Note: background prefetch uses m.prefetching; avoid duplicating requests.
+							if !m.runCpsLoaded[run.ID] && !m.loadingRuns[run.ID] && !m.prefetching[run.ID] {
 								m.loadingRuns[run.ID] = true
 								m.rebuildTreeItems()
 								return m, tea.Batch(m.spinner.Tick, loadRunCheckpoints(m.client, run.ID))
+							}
+							// If prefetch is already in-flight, mirror it into loadingRuns so the UI
+							// shows the spinner while the expanded run waits for checkpoints.
+							if !m.runCpsLoaded[run.ID] && m.prefetching[run.ID] {
+								m.loadingRuns[run.ID] = true
 							}
 						}
 						m.rebuildTreeItems()
@@ -740,9 +920,13 @@ func (m model) menuView() string {
 	b.WriteString("\n\n")
 
 	// Separator
+	sepWidth := 32
+	if cw := m.contentWidth(); cw > 0 {
+		sepWidth = cw
+	}
 	separator := lipgloss.NewStyle().
 		Foreground(ui.ColorTextMuted).
-		Render(strings.Repeat("─", 32))
+		Render(strings.Repeat("─", sepWidth))
 	b.WriteString(separator)
 	b.WriteString("\n\n")
 
@@ -750,11 +934,9 @@ func (m model) menuView() string {
 	b.WriteString(m.menu.View())
 
 	// Help
-	b.WriteString("\n")
 	help := m.styles.RenderHelp("↑↓", "navigate", "enter", "select", "q", "quit")
-	b.WriteString(m.styles.Help.Render(help))
-
-	return m.styles.App.Render(b.String())
+	footer := m.styles.Help.Render(help)
+	return m.renderWithFooter(b.String(), footer)
 }
 
 func (m model) runsView() string {
@@ -797,11 +979,9 @@ func (m model) runsView() string {
 		}
 	}
 
-	b.WriteString("\n\n")
 	help := m.styles.RenderHelp("↑↓", "move", "space", "expand", "r", "refresh", "p", "publish", "d", "delete", "esc", "back")
-	b.WriteString(m.styles.Help.Render(help))
-
-	return m.styles.App.Render(b.String())
+	footer := m.styles.Help.Render(help)
+	return m.renderWithFooter(b.String(), footer)
 }
 
 func (m model) renderTreeView() string {
@@ -813,7 +993,13 @@ func (m model) renderTreeView() string {
 	}
 
 	startIdx := m.scrollOffset
-	endIdx := m.scrollOffset + visibleLines
+	itemLines := visibleLines
+	showScroll := len(m.treeItems) > visibleLines
+	if showScroll && visibleLines > 1 {
+		itemLines = visibleLines - 1 // reserve one line for scroll info
+	}
+
+	endIdx := m.scrollOffset + itemLines
 	if endIdx > len(m.treeItems) {
 		endIdx = len(m.treeItems)
 	}
@@ -835,7 +1021,7 @@ func (m model) renderTreeView() string {
 		b.WriteString("\n")
 	}
 
-	if len(m.treeItems) > visibleLines {
+	if showScroll {
 		scrollInfo := fmt.Sprintf("%d-%d of %d", startIdx+1, endIdx, len(m.treeItems))
 		b.WriteString(m.styles.Description.Render(scrollInfo))
 	}
@@ -863,10 +1049,16 @@ func (m model) renderRunRow(runIdx int, isSelected bool) string {
 		status = "–"
 	}
 
-	model := truncate(run.BaseModel, 20)
 	created := "–"
 	if !run.CreatedAt.IsZero() {
 		created = run.CreatedAt.Format("Jan 02 15:04")
+	}
+
+	// Number of checkpoints (deduped by step so weights + sampler_weights count as one).
+	cpCount := runCheckpointCount(run.Checkpoints)
+	cpCountStr := "–"
+	if m.runCpsLoaded[run.ID] {
+		cpCountStr = fmt.Sprintf("%d", cpCount)
 	}
 
 	cursor := "  "
@@ -874,12 +1066,75 @@ func (m model) renderRunRow(runIdx int, isSelected bool) string {
 		cursor = lipgloss.NewStyle().Foreground(ui.ColorPrimary).Render("› ")
 	}
 
-	row := fmt.Sprintf("%s %s %-20s %-12s %s",
+	// Make the row expand with terminal width.
+	// Total visible width includes the 2-char cursor prefix.
+	contentW := m.contentWidth()
+	rowW := contentW - 2
+	if rowW <= 0 {
+		// Fallback (pre-resize / unknown dimensions)
+		model := truncate(run.BaseModel, 20)
+		row := fmt.Sprintf("%s %s %-20s %-12s %s",
+			expandIcon,
+			truncate(run.ID, 12),
+			model,
+			status,
+			created,
+		)
+		if isSelected {
+			return cursor + lipgloss.NewStyle().Foreground(ui.ColorPrimary).Render(row)
+		}
+		return cursor + lipgloss.NewStyle().Foreground(ui.ColorTextNormal).Render(row)
+	}
+
+	iconW := lipgloss.Width(expandIcon)
+	createdW := lipgloss.Width(created)
+	if createdW == 0 {
+		createdW = 1
+	}
+	cpW := lipgloss.Width(cpCountStr)
+	if cpW < 1 {
+		cpW = 1
+	}
+
+	// Spaces between columns: icon␠id␠model␠status␠created␠count => 5 spaces
+	fixed := iconW + createdW + cpW + 5
+	remaining := rowW - fixed
+	if remaining < 12 {
+		remaining = 12
+	}
+
+	idMin, idMax := 8, 24
+	statusMin, statusMax := 9, 14
+	modelMin := 10
+
+	// Let ID and status grow a bit, but bias extra space toward model.
+	idW := clamp(12+(rowW-60)/6, idMin, idMax)
+	statusW := clamp(12+(rowW-60)/12, statusMin, statusMax)
+	modelW := remaining - idW - statusW
+
+	if modelW < modelMin {
+		deficit := modelMin - modelW
+		// Shrink ID first, then status, to preserve model visibility.
+		shrink := min(deficit, idW-idMin)
+		idW -= shrink
+		deficit -= shrink
+		if deficit > 0 {
+			shrink = min(deficit, statusW-statusMin)
+			statusW -= shrink
+		}
+		modelW = remaining - idW - statusW
+		if modelW < modelMin {
+			modelW = modelMin
+		}
+	}
+
+	row := fmt.Sprintf("%s %-*s %-*s %-*s %s %*s",
 		expandIcon,
-		truncate(run.ID, 12),
-		model,
-		status,
+		idW, truncate(run.ID, idW),
+		modelW, truncate(run.BaseModel, modelW),
+		statusW, truncate(status, statusW),
 		created,
+		cpW, cpCountStr,
 	)
 
 	if isSelected {
@@ -914,8 +1169,29 @@ func (m model) renderCheckpointRow(runIdx, cpIdx int, isSelected bool) string {
 		cursor = lipgloss.NewStyle().Foreground(ui.ColorAccent).Render("› ")
 	}
 
-	row := fmt.Sprintf("    └ %-18s %s %s",
-		truncate(cp.Name, 18),
+	// Expand checkpoint name with terminal width.
+	contentW := m.contentWidth()
+	rowW := contentW - 2
+	if rowW <= 0 {
+		row := fmt.Sprintf("    └ %-18s %s %s",
+			truncate(cp.Name, 18),
+			published,
+			created,
+		)
+		if isSelected {
+			return cursor + lipgloss.NewStyle().Foreground(ui.ColorAccent).Render(row)
+		}
+		return cursor + lipgloss.NewStyle().Foreground(ui.ColorTextDim).Render(row)
+	}
+
+	prefix := "    └ "
+	fixed := lipgloss.Width(prefix) + 1 + lipgloss.Width(published) + 1 + lipgloss.Width(created)
+	nameW := rowW - fixed
+	nameW = clamp(nameW, 10, 80)
+
+	row := fmt.Sprintf("%s%-*s %s %s",
+		prefix,
+		nameW, truncate(cp.Name, nameW),
 		published,
 		created,
 	)
@@ -964,11 +1240,9 @@ func (m model) checkpointsView() string {
 		}
 	}
 
-	b.WriteString("\n\n")
 	help := m.styles.RenderHelp("↑↓", "move", "r", "refresh", "p", "publish", "d", "delete", "esc", "back")
-	b.WriteString(m.styles.Help.Render(help))
-
-	return m.styles.App.Render(b.String())
+	footer := m.styles.Help.Render(help)
+	return m.renderWithFooter(b.String(), footer)
 }
 
 func (m model) renderCheckpointsList() string {
@@ -985,7 +1259,13 @@ func (m model) renderCheckpointsList() string {
 	}
 
 	startIdx := m.cpScrollOffset
-	endIdx := m.cpScrollOffset + visibleLines
+	itemLines := visibleLines
+	showScroll := len(m.checkpoints) > visibleLines
+	if showScroll && visibleLines > 1 {
+		itemLines = visibleLines - 1 // reserve one line for scroll info
+	}
+
+	endIdx := m.cpScrollOffset + itemLines
 	if endIdx > len(m.checkpoints) {
 		endIdx = len(m.checkpoints)
 	}
@@ -1009,10 +1289,29 @@ func (m model) renderCheckpointsList() string {
 			created = cp.CreatedAt.Format("Jan 02")
 		}
 
-		row := fmt.Sprintf("%-20s %s %-12s %s",
-			truncate(cp.Name, 20),
+		// Expand list columns with terminal width.
+		contentW := m.contentWidth()
+		rowW := contentW - 2
+		if rowW <= 0 {
+			rowW = 0
+		}
+
+		typeW := 12
+		if rowW >= 90 {
+			typeW = 18
+		}
+		createdW := lipgloss.Width(created)
+		fixed := 1 + typeW + 1 + lipgloss.Width(published) + 1 + createdW // spaces + columns
+		nameW := 20
+		if rowW > 0 {
+			nameW = rowW - fixed
+			nameW = clamp(nameW, 12, 80)
+		}
+
+		row := fmt.Sprintf("%-*s %s %-*s %s",
+			nameW, truncate(cp.Name, nameW),
 			published,
-			truncate(cp.Type, 12),
+			typeW, truncate(cp.Type, typeW),
 			created,
 		)
 
@@ -1024,7 +1323,7 @@ func (m model) renderCheckpointsList() string {
 		b.WriteString("\n")
 	}
 
-	if len(m.checkpoints) > visibleLines {
+	if showScroll {
 		scrollInfo := fmt.Sprintf("%d-%d of %d", startIdx+1, endIdx, len(m.checkpoints))
 		b.WriteString(m.styles.Description.Render(scrollInfo))
 	}
@@ -1049,11 +1348,9 @@ func (m model) usageView() string {
 		b.WriteString(m.styles.Description.Render("no data"))
 	}
 
-	b.WriteString("\n\n")
 	help := m.styles.RenderHelp("r", "refresh", "esc", "back")
-	b.WriteString(m.styles.Help.Render(help))
-
-	return m.styles.App.Render(b.String())
+	footer := m.styles.Help.Render(help)
+	return m.renderWithFooter(b.String(), footer)
 }
 
 func (m model) renderUsageStats() string {
@@ -1156,9 +1453,8 @@ func (m model) settingsView() string {
 	} else {
 		help = m.styles.RenderHelp("↑↓", "navigate", "enter", "edit", "d", "delete", "esc", "back")
 	}
-	b.WriteString(m.styles.Help.Render(help))
-
-	return m.styles.App.Render(b.String())
+	footer := m.styles.Help.Render(help)
+	return m.renderWithFooter(b.String(), footer)
 }
 
 func (m model) getAPIKeyStatus() string {
@@ -1212,11 +1508,16 @@ func (m *model) ensureTreeVisible() {
 		visibleLines = 5
 	}
 
+	itemLines := visibleLines
+	if len(m.treeItems) > visibleLines && visibleLines > 1 {
+		itemLines = visibleLines - 1 // reserve one line for scroll info
+	}
+
 	if m.treeCursor < m.scrollOffset {
 		m.scrollOffset = m.treeCursor
 	}
-	if m.treeCursor >= m.scrollOffset+visibleLines {
-		m.scrollOffset = m.treeCursor - visibleLines + 1
+	if m.treeCursor >= m.scrollOffset+itemLines {
+		m.scrollOffset = m.treeCursor - itemLines + 1
 	}
 }
 
@@ -1226,11 +1527,16 @@ func (m *model) ensureCpVisible() {
 		visibleLines = 5
 	}
 
+	itemLines := visibleLines
+	if len(m.checkpoints) > visibleLines && visibleLines > 1 {
+		itemLines = visibleLines - 1 // reserve one line for scroll info
+	}
+
 	if m.cpCursor < m.cpScrollOffset {
 		m.cpScrollOffset = m.cpCursor
 	}
-	if m.cpCursor >= m.cpScrollOffset+visibleLines {
-		m.cpScrollOffset = m.cpCursor - visibleLines + 1
+	if m.cpCursor >= m.cpScrollOffset+itemLines {
+		m.cpScrollOffset = m.cpCursor - itemLines + 1
 	}
 }
 
@@ -1242,6 +1548,70 @@ func truncate(s string, maxLen int) string {
 		return s[:maxLen]
 	}
 	return s[:maxLen-1] + "…"
+}
+
+// runCheckpointCount returns the number of checkpoints, deduping weights/sampler_weights
+// that share the same step.
+func runCheckpointCount(cps []api.Checkpoint) int {
+	if len(cps) == 0 {
+		return 0
+	}
+	seen := make(map[string]struct{}, len(cps))
+	for _, cp := range cps {
+		// Prefer explicit step if present.
+		if cp.Step > 0 {
+			seen[fmt.Sprintf("step:%d", cp.Step)] = struct{}{}
+			continue
+		}
+		// Otherwise dedupe by the last path segment (e.g. weights/000500 + sampler_weights/000500).
+		key := cp.Name
+		if key == "" {
+			key = cp.Path
+		}
+		if key == "" {
+			key = cp.TinkerPath
+		}
+		seg := lastPathSegment(key)
+		if seg == "" {
+			seg = key
+		}
+		seen["seg:"+seg] = struct{}{}
+	}
+	return len(seen)
+}
+
+func lastPathSegment(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return ""
+	}
+	// Normalize separators.
+	s = strings.ReplaceAll(s, "\\", "/")
+	s = strings.TrimRight(s, "/")
+	if s == "" {
+		return ""
+	}
+	if idx := strings.LastIndex(s, "/"); idx >= 0 && idx < len(s)-1 {
+		return s[idx+1:]
+	}
+	return s
+}
+
+func clamp(v, lo, hi int) int {
+	if v < lo {
+		return lo
+	}
+	if v > hi {
+		return hi
+	}
+	return v
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 // Menu delegate for custom rendering
