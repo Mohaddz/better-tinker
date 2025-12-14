@@ -9,6 +9,9 @@ dependencies = [
     "uvicorn[standard]>=0.24.0",
     "pydantic>=2.0.0",
     "tinker",
+    "tinker_cookbook",
+    "transformers>=4.45.0",
+    "sentencepiece>=0.2.0",
 ]
 
 [project.scripts]

@@ -72,6 +72,39 @@ func loadUsage(client *api.Client) tea.Cmd {
 	}
 }
 
+func loadTrainingRun(client *api.Client, runID string) tea.Cmd {
+	return func() tea.Msg {
+		if client == nil {
+			return trainingRunLoadedMsg{err: fmt.Errorf("not connected")}
+		}
+		run, err := client.GetTrainingRun(runID)
+		if err != nil {
+			return trainingRunLoadedMsg{err: err}
+		}
+		return trainingRunLoadedMsg{run: run}
+	}
+}
+
+func chatSample(client *api.Client, modelPath, baseModel string, messages []api.ChatMessage) tea.Cmd {
+	return func() tea.Msg {
+		if client == nil {
+			return chatResponseMsg{err: fmt.Errorf("not connected")}
+		}
+		resp, err := client.ChatWithCheckpoint(api.ChatRequest{
+			ModelPath:   modelPath,
+			BaseModel:   baseModel,
+			Messages:    messages,
+			MaxTokens:   512,
+			Temperature: 0.7,
+			TopP:        0.9,
+		})
+		if err != nil {
+			return chatResponseMsg{err: err}
+		}
+		return chatResponseMsg{content: resp.Content}
+	}
+}
+
 func publishCheckpoint(client *api.Client, path string) tea.Cmd {
 	return func() tea.Msg {
 		_, err := client.PublishCheckpoint(path)

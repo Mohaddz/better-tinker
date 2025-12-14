@@ -10,7 +10,7 @@ this key to initialize the Tinker SDK client.
 
 import os
 import threading
-from typing import Optional, List, Dict
+from typing import Optional, List, Dict, Literal
 from datetime import datetime
 from contextlib import asynccontextmanager
 
@@ -21,10 +21,20 @@ from pydantic import BaseModel
 # Tinker SDK imports
 try:
     import tinker
+    from tinker import types as tinker_types
     TINKER_AVAILABLE = True
 except ImportError:
     TINKER_AVAILABLE = False
     print("⚠ Warning: tinker SDK not installed. Running in mock mode.")
+
+# Optional cookbook utilities (for correct chat prompt formatting)
+try:
+    from tinker_cookbook import renderers
+    from tinker_cookbook.model_info import get_recommended_renderer_name
+    from tinker_cookbook.tokenizer_utils import get_tokenizer
+    TINKER_COOKBOOK_AVAILABLE = True
+except Exception:
+    TINKER_COOKBOOK_AVAILABLE = False
 
 
 # ============================================================================
@@ -89,6 +99,67 @@ class UsageStats(BaseModel):
     total_checkpoints: int
     compute_hours: float
     storage_gb: float
+
+
+# ============================================================================
+# Chat models
+# ============================================================================
+
+class ChatMessage(BaseModel):
+    role: Literal["user", "assistant", "system"]
+    content: str
+
+
+class ChatRequest(BaseModel):
+    model_path: str
+    base_model: Optional[str] = None
+    messages: List[ChatMessage]
+    max_tokens: int = 512
+    temperature: float = 0.7
+    top_p: float = 0.9
+
+
+class ChatResponse(BaseModel):
+    content: str
+
+
+# ============================================================================
+# Chat helpers
+# ============================================================================
+
+def _build_fallback_chat_prompt(messages: List["ChatMessage"]) -> str:
+    # A very simple, model-agnostic chat template.
+    # Not as high-quality as tinker_cookbook renderers, but works without extra deps.
+    lines: list[str] = []
+    for m in messages:
+        role = (m.role or "").lower()
+        content = (m.content or "").strip()
+        if not content:
+            continue
+        if role == "system":
+            lines.append(f"System: {content}")
+        elif role == "assistant":
+            lines.append(f"Assistant: {content}")
+        else:
+            lines.append(f"User: {content}")
+    lines.append("Assistant:")
+    return "\n".join(lines).strip() + "\n"
+
+
+def _decode_completion_from_tokens(tokenizer, prompt_tokens: List[int], output_tokens: List[int]) -> str:
+    # Tinker returns token ids. We decode them and best-effort strip the prompt.
+    prompt_text = tokenizer.decode(prompt_tokens, skip_special_tokens=True)
+    out_text = tokenizer.decode(output_tokens, skip_special_tokens=True)
+
+    # Normalize a bit for prefix removal.
+    if out_text.startswith(prompt_text):
+        out_text = out_text[len(prompt_text):]
+
+    out_text = out_text.lstrip("\n")
+    if out_text.startswith("Assistant:"):
+        out_text = out_text[len("Assistant:"):]
+
+    return out_text.strip()
 
 
 # ============================================================================
@@ -228,13 +299,23 @@ def convert_training_run(tr) -> TrainingRun:
 
 def convert_checkpoint(cp, training_run_id: str = "") -> Checkpoint:
     """Convert Tinker SDK checkpoint to our model."""
+    tinker_path = cp.tinker_path if hasattr(cp, 'tinker_path') else ""
+    derived_run_id = training_run_id
+    if (not derived_run_id) and hasattr(cp, 'training_run_id') and cp.training_run_id:
+        derived_run_id = cp.training_run_id
+    # Fallback: infer run id from tinker path (tinker://<run-id>/...)
+    if (not derived_run_id) and isinstance(tinker_path, str) and tinker_path.startswith("tinker://"):
+        rest = tinker_path[len("tinker://"):].lstrip("/")
+        if rest:
+            derived_run_id = rest.split("/", 1)[0]
+
     return Checkpoint(
         checkpoint_id=cp.checkpoint_id if hasattr(cp, 'checkpoint_id') else str(cp),
         name=cp.name if hasattr(cp, 'name') else cp.checkpoint_id,
         checkpoint_type=cp.checkpoint_type if hasattr(cp, 'checkpoint_type') else "training",
-        training_run_id=cp.training_run_id if hasattr(cp, 'training_run_id') else training_run_id,
+        training_run_id=derived_run_id,
         path=cp.path if hasattr(cp, 'path') else "",
-        tinker_path=cp.tinker_path if hasattr(cp, 'tinker_path') else "",
+        tinker_path=tinker_path,
         is_published=cp.is_published if hasattr(cp, 'is_published') else False,
         created_at=cp.created_at if hasattr(cp, 'created_at') else None,
         step=cp.step if hasattr(cp, 'step') else None,
@@ -438,6 +519,107 @@ async def get_checkpoint_archive_url(training_run_id: str, checkpoint_id: str, r
         if "not found" in str(e).lower():
             raise HTTPException(status_code=404, detail=f"Checkpoint not found")
         raise HTTPException(status_code=500, detail=f"Failed to get archive URL: {str(e)}")
+
+
+@app.post("/chat", response_model=ChatResponse)
+async def chat_with_checkpoint(request: Request, body: ChatRequest):
+    """
+    Chat with a specific checkpoint (model weights) via SamplingClient.
+
+    The client should pass:
+    - model_path: checkpoint tinker path, e.g. "tinker://<run-id>/weights/<checkpoint>"
+    - base_model: base model name (optional but recommended for renderer/tokenizer)
+    - messages: chat history (system/user/assistant)
+    """
+    if not TINKER_AVAILABLE:
+        raise HTTPException(
+            status_code=503,
+            detail="Tinker SDK not installed. Please install with: pip install tinker",
+        )
+
+    api_key = extract_api_key(request)
+    if not api_key:
+        raise HTTPException(
+            status_code=401,
+            detail="API key required. Pass via Authorization header or set TINKER_API_KEY env var.",
+        )
+
+    service_client, _ = client_manager.get_client(api_key)
+    if service_client is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Failed to initialize Tinker client. Please check your API key.",
+        )
+
+    if not body.model_path or not body.model_path.strip():
+        raise HTTPException(status_code=400, detail="model_path is required")
+
+    try:
+        os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
+        sampling_client = service_client.create_sampling_client(model_path=body.model_path)
+
+        stop_sequences: list[str] = []
+        prompt_input = None
+        prompt_tokens: list[int] = []
+
+        if TINKER_COOKBOOK_AVAILABLE and body.base_model:
+            tokenizer = get_tokenizer(body.base_model)
+            renderer = renderers.get_renderer(get_recommended_renderer_name(body.base_model), tokenizer)
+            history: list[renderers.Message] = [
+                {"role": m.role, "content": m.content} for m in body.messages if m.content is not None
+            ]
+            model_input = renderer.build_generation_prompt(history)
+            stop_sequences = renderer.get_stop_sequences()
+            # Some cookbook renderers return a string prompt; Tinker SDK requires ModelInput.
+            # We can reliably create ModelInput from token ids.
+            prompt_tokens = tokenizer.encode(model_input)
+            prompt_input = tinker.ModelInput.from_ints(prompt_tokens)
+        else:
+            # Cookbook isn't available (or base_model not provided). Use a fallback prompt.
+            if not body.base_model:
+                raise HTTPException(status_code=400, detail="base_model is required for chat (tokenization)")
+
+            try:
+                from transformers import AutoTokenizer  # type: ignore
+            except Exception as e:
+                raise HTTPException(
+                    status_code=503,
+                    detail=f"transformers not installed for chat fallback: {e}",
+                )
+
+            tokenizer = AutoTokenizer.from_pretrained(body.base_model, trust_remote_code=True)
+            model_input = _build_fallback_chat_prompt(body.messages)
+            stop_sequences = ["\nUser:", "\nSystem:"]
+            prompt_tokens = tokenizer.encode(model_input, add_special_tokens=False)
+            prompt_input = tinker.ModelInput.from_ints(prompt_tokens)
+
+        sampling_params = tinker_types.SamplingParams(
+            max_tokens=body.max_tokens,
+            temperature=body.temperature,
+            top_p=body.top_p,
+            stop=stop_sequences,
+        )
+
+        response = sampling_client.sample(
+            prompt=prompt_input,
+            num_samples=1,
+            sampling_params=sampling_params,
+        ).result()
+
+        # If cookbook renderers are available, prefer parsing tokens. Otherwise, best-effort
+        # use the SDK-provided generated_text.
+        if TINKER_COOKBOOK_AVAILABLE and body.base_model:
+            parsed_message, _ = renderer.parse_response(response.sequences[0].tokens)
+            return ChatResponse(content=(parsed_message.get("content", "") or "").strip())
+
+        # Fallback: decode tokens and strip prompt.
+        out_tokens = response.sequences[0].tokens if response.sequences else []
+        return ChatResponse(content=_decode_completion_from_tokens(tokenizer, prompt_tokens, out_tokens))
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to chat: {str(e)}")
 
 
 # ============================================================================

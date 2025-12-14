@@ -2,9 +2,12 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"time"
 
@@ -108,8 +111,21 @@ func (c *Client) CheckBridgeHealth() error {
 	return nil
 }
 
-// doRequest performs an HTTP request with authentication
-func (c *Client) doRequest(method, path string, body interface{}) ([]byte, error) {
+func isTimeoutErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	var ne net.Error
+	if errors.As(err, &ne) && ne.Timeout() {
+		return true
+	}
+	return false
+}
+
+func (c *Client) doRequestWithTimeout(method, path string, body interface{}, timeout time.Duration) ([]byte, error) {
 	var reqBody io.Reader
 	if body != nil {
 		jsonBody, err := json.Marshal(body)
@@ -129,8 +145,18 @@ func (c *Client) doRequest(method, path string, body interface{}) ([]byte, error
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
 
-	resp, err := c.httpClient.Do(req)
+	hc := c.httpClient
+	if timeout > 0 {
+		clone := *c.httpClient
+		clone.Timeout = timeout
+		hc = &clone
+	}
+
+	resp, err := hc.Do(req)
 	if err != nil {
+		if isTimeoutErr(err) {
+			return nil, fmt.Errorf("request timed out waiting for bridge response: %w", err)
+		}
 		return nil, fmt.Errorf("request failed (is the bridge server running?): %w", err)
 	}
 	defer resp.Body.Close()
@@ -156,6 +182,11 @@ func (c *Client) doRequest(method, path string, body interface{}) ([]byte, error
 	}
 
 	return respBody, nil
+}
+
+// doRequest performs an HTTP request with authentication
+func (c *Client) doRequest(method, path string, body interface{}) ([]byte, error) {
+	return c.doRequestWithTimeout(method, path, body, 0)
 }
 
 // ListTrainingRuns lists all training runs with pagination
@@ -311,4 +342,32 @@ func (c *Client) GetCheckpointArchiveURL(trainingRunID, checkpointID string) (st
 	}
 
 	return response.URL, nil
+}
+
+// ChatWithCheckpoint sends a chat request to the bridge sampling endpoint.
+// modelPath should be the checkpoint tinker path (e.g. tinker://...).
+// baseModel is required for proper prompt rendering on the bridge.
+func (c *Client) ChatWithCheckpoint(req ChatRequest) (*ChatResponse, error) {
+	if req.MaxTokens == 0 {
+		req.MaxTokens = 512
+	}
+	if req.Temperature == 0 {
+		req.Temperature = 0.7
+	}
+	if req.TopP == 0 {
+		req.TopP = 0.9
+	}
+
+	// Chat can take longer than normal API calls (model load, tokenization, Tinker latency).
+	respBody, err := c.doRequestWithTimeout(http.MethodPost, "/chat", req, 5*time.Minute)
+	if err != nil {
+		return nil, err
+	}
+
+	var response ChatResponse
+	if err := json.Unmarshal(respBody, &response); err != nil {
+		return nil, fmt.Errorf("failed to parse response: %w", err)
+	}
+
+	return &response, nil
 }

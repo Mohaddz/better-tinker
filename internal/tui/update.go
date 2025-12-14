@@ -52,6 +52,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			menuH = 0
 		}
 		m.menu.SetSize(menuW, menuH)
+		// Chat input should match content width.
+		if cw := m.contentWidth(); cw > 0 {
+			w := cw - 2
+			if w < 10 {
+				w = 10
+			}
+			m.chatInput.Width = w
+		}
 		return m, nil
 
 	case runsLoadedMsg:
@@ -98,7 +106,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		m.rebuildTreeItems()
-		if wasPrefetch && m.view == viewRuns {
+		if wasPrefetch && (m.view == viewRuns || m.view == viewChatPick) {
 			return m, (&m).prefetchNextRunCheckpointsCmd()
 		}
 		return m, nil
@@ -131,6 +139,37 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			m.usageStats = msg.stats
 		}
+		return m, nil
+
+	case trainingRunLoadedMsg:
+		m.loading = false
+		if msg.err != nil {
+			m.err = msg.err
+			return m, nil
+		}
+		if msg.run == nil {
+			m.err = fmt.Errorf("failed to load training run")
+			return m, nil
+		}
+		m.chatBaseModel = msg.run.BaseModel
+		m.chatMessages = nil
+		m.chatInput.SetValue("")
+		m.chatInput.Focus()
+		m.view = viewChat
+		m.err = nil
+		m.statusMsg = ""
+		return m, textinput.Blink
+
+	case chatResponseMsg:
+		m.loading = false
+		if msg.err != nil {
+			m.err = msg.err
+			return m, nil
+		}
+		m.chatMessages = append(m.chatMessages, api.ChatMessage{
+			Role:    "assistant",
+			Content: cleanAssistantText(msg.content),
+		})
 		return m, nil
 
 	case actionCompleteMsg:
@@ -200,6 +239,65 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case tea.KeyMsg:
+		// Chat input handling (minimal chat interface).
+		if m.view == viewChat {
+			switch msg.String() {
+			case "esc":
+				m.chatInput.Blur()
+				m.view = viewChatPick
+				m.err = nil
+				m.statusMsg = ""
+				return m, nil
+			case "ctrl+c":
+				m.chatInput.Blur()
+				m.view = viewMenu
+				m.err = nil
+				m.statusMsg = ""
+				return m, nil
+			case "ctrl+n":
+				m.chatMessages = nil
+				m.chatInput.SetValue("")
+				m.err = nil
+				m.statusMsg = ""
+				return m, nil
+			case "enter":
+				userInput := strings.TrimSpace(m.chatInput.Value())
+				if userInput == "" {
+					return m, nil
+				}
+				if m.chatCheckpoint == nil {
+					m.err = fmt.Errorf("no checkpoint selected")
+					return m, nil
+				}
+				if m.chatCheckpoint.TinkerPath == "" {
+					m.err = fmt.Errorf("checkpoint has no tinker path")
+					return m, nil
+				}
+				if m.chatBaseModel == "" {
+					m.err = fmt.Errorf("missing base model for chat")
+					return m, nil
+				}
+
+				m.chatMessages = append(m.chatMessages, api.ChatMessage{
+					Role:    "user",
+					Content: userInput,
+				})
+				m.chatInput.SetValue("")
+				m.loading = true
+				m.err = nil
+				return m, tea.Batch(m.spinner.Tick, chatSample(m.client, m.chatCheckpoint.TinkerPath, m.chatBaseModel, m.chatMessages))
+			default:
+				var cmd tea.Cmd
+				m.chatInput, cmd = m.chatInput.Update(msg)
+				// For Arabic/RTL typing, keep the cursor at the end to avoid mismatches
+				// between terminal visual order and internal cursor position.
+				if containsArabic(m.chatInput.Value()) && visualRTLMode() {
+					m.chatInput.SetCursor(len([]rune(m.chatInput.Value())))
+				}
+				return m, cmd
+			}
+		}
+
 		// While editing, prioritize the text input (and allow Ctrl+V paste)
 		// instead of triggering global navigation (ESC/back).
 		if m.view == viewSettings && m.settingsEditing {
@@ -396,6 +494,22 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						m.cpCursor = 0
 						m.cpScrollOffset = 0
 						return m, tea.Batch(m.spinner.Tick, loadCheckpoints(m.client))
+					case viewChatPick:
+						m.expandedRuns = make(map[string]bool)
+						m.loadingRuns = make(map[string]bool)
+						m.runCpsLoaded = make(map[string]bool)
+						m.prefetching = make(map[string]bool)
+						m.prefetchQueue = nil
+						m.treeCursor = 0
+						m.scrollOffset = 0
+
+						m.chatCheckpoint = nil
+						m.chatBaseModel = ""
+						m.chatMessages = nil
+						m.chatInput.Blur()
+						m.chatInput.SetValue("")
+						m.loading = true
+						return m, tea.Batch(m.spinner.Tick, loadRuns(m.client))
 					case viewUsage:
 						m.loading = true
 						return m, tea.Batch(m.spinner.Tick, loadUsage(m.client))
@@ -440,6 +554,58 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					}
 				}
 			}
+			if m.view == viewChatPick && !m.loading {
+				if m.treeCursor < 0 || m.treeCursor >= len(m.treeItems) {
+					return m, nil
+				}
+				item := m.treeItems[m.treeCursor]
+				if item.isRun {
+					// Toggle expansion (same as space in runs view)
+					if item.runIndex < len(m.runs) {
+						run := m.runs[item.runIndex]
+						if m.expandedRuns[run.ID] {
+							delete(m.expandedRuns, run.ID)
+							m.rebuildTreeItems()
+							return m, nil
+						}
+						m.expandedRuns[run.ID] = true
+						// Load checkpoints if needed
+						if !m.runCpsLoaded[run.ID] && !m.loadingRuns[run.ID] && !m.prefetching[run.ID] {
+							m.loadingRuns[run.ID] = true
+							m.rebuildTreeItems()
+							return m, tea.Batch(m.spinner.Tick, loadRunCheckpoints(m.client, run.ID))
+						}
+						if !m.runCpsLoaded[run.ID] && m.prefetching[run.ID] {
+							m.loadingRuns[run.ID] = true
+						}
+						m.rebuildTreeItems()
+					}
+					return m, nil
+				}
+
+				// Select checkpoint (only sampler checkpoints are shown in this view)
+				if item.runIndex >= len(m.runs) {
+					return m, nil
+				}
+				run := m.runs[item.runIndex]
+				if item.cpIndex < 0 || item.cpIndex >= len(run.Checkpoints) {
+					return m, nil
+				}
+				cp := &m.runs[item.runIndex].Checkpoints[item.cpIndex]
+				if !isSamplingCheckpoint(*cp) {
+					return m, nil
+				}
+
+				m.chatCheckpoint = cp
+				m.chatBaseModel = ""
+				m.chatMessages = nil
+				m.chatInput.Blur()
+				m.chatInput.SetValue("")
+				m.loading = true
+				m.err = nil
+				m.statusMsg = ""
+				return m, tea.Batch(m.spinner.Tick, loadTrainingRun(m.client, run.ID))
+			}
 
 		case "r":
 			if m.view != viewMenu {
@@ -456,6 +622,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return m, tea.Batch(m.spinner.Tick, loadRuns(m.client))
 				case viewCheckpoints:
 					return m, tea.Batch(m.spinner.Tick, loadCheckpoints(m.client))
+				case viewChatPick:
+					m.expandedRuns = make(map[string]bool)
+					m.loadingRuns = make(map[string]bool)
+					m.runCpsLoaded = make(map[string]bool)
+					m.prefetching = make(map[string]bool)
+					m.prefetchQueue = nil
+					m.treeCursor = 0
+					m.scrollOffset = 0
+					return m, tea.Batch(m.spinner.Tick, loadRuns(m.client))
 				case viewUsage:
 					return m, tea.Batch(m.spinner.Tick, loadUsage(m.client))
 				}
@@ -518,7 +693,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 
 		case " ":
-			if m.view == viewRuns && !m.loading {
+			if (m.view == viewRuns || m.view == viewChatPick) && !m.loading {
 				if m.treeCursor >= 0 && m.treeCursor < len(m.treeItems) {
 					item := m.treeItems[m.treeCursor]
 					if item.isRun && item.runIndex < len(m.runs) {
@@ -548,7 +723,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				return m, nil
 			}
-			if m.view == viewRuns && !m.loading {
+			if (m.view == viewRuns || m.view == viewChatPick) && !m.loading {
 				if m.treeCursor > 0 {
 					m.treeCursor--
 					m.ensureTreeVisible()
@@ -570,7 +745,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				return m, nil
 			}
-			if m.view == viewRuns && !m.loading {
+			if (m.view == viewRuns || m.view == viewChatPick) && !m.loading {
 				if m.treeCursor < len(m.treeItems)-1 {
 					m.treeCursor++
 					m.ensureTreeVisible()
@@ -598,6 +773,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.settingsInput, cmd = m.settingsInput.Update(msg)
 			cmds = append(cmds, cmd)
 		}
+	case viewChat:
+		var cmd tea.Cmd
+		m.chatInput, cmd = m.chatInput.Update(msg)
+		cmds = append(cmds, cmd)
 	}
 
 	return m, tea.Batch(cmds...)
@@ -615,6 +794,9 @@ func (m *model) rebuildTreeItems() {
 
 		if m.expandedRuns[run.ID] {
 			for cpIdx := range run.Checkpoints {
+				if m.view == viewChatPick && !isSamplingCheckpoint(run.Checkpoints[cpIdx]) {
+					continue
+				}
 				m.treeItems = append(m.treeItems, treeItem{
 					isRun:    false,
 					runIndex: runIdx,

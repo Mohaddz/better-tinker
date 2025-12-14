@@ -74,3 +74,24 @@ type UsageStats struct {
 	ComputeHours      float64 `json:"compute_hours"`
 	StorageGB         float64 `json:"storage_gb"`
 }
+
+// ChatMessage represents a single chat turn.
+type ChatMessage struct {
+	Role    string `json:"role"`    // "user" | "assistant" | "system"
+	Content string `json:"content"` // text content
+}
+
+// ChatRequest is sent to the bridge /chat endpoint.
+type ChatRequest struct {
+	ModelPath    string        `json:"model_path"`
+	BaseModel    string        `json:"base_model"`
+	Messages     []ChatMessage `json:"messages"`
+	MaxTokens    int           `json:"max_tokens"`
+	Temperature  float64       `json:"temperature"`
+	TopP         float64       `json:"top_p"`
+}
+
+// ChatResponse is returned from the bridge /chat endpoint.
+type ChatResponse struct {
+	Content string `json:"content"`
+}

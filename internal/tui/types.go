@@ -10,6 +10,8 @@ const (
 	viewCheckpoints
 	viewUsage
 	viewSettings
+	viewChatPick
+	viewChat
 )
 
 type menuItem struct {
@@ -76,3 +78,13 @@ type clipboardPasteMsg struct {
 }
 
 type escCancelCheckMsg struct{}
+
+type trainingRunLoadedMsg struct {
+	run *api.TrainingRun
+	err error
+}
+
+type chatResponseMsg struct {
+	content string
+	err     error
+}

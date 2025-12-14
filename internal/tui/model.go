@@ -23,6 +23,12 @@ type model struct {
 	checkpoints []api.Checkpoint
 	usageStats  *api.UsageStats
 
+	// Chat state
+	chatCheckpoint *api.Checkpoint
+	chatBaseModel  string
+	chatMessages   []api.ChatMessage
+	chatInput      textinput.Model
+
 	loading   bool
 	err       error
 	statusMsg string
@@ -77,6 +83,7 @@ func initialModel() model {
 	items := []list.Item{
 		menuItem{title: "Training Runs", desc: "View runs with checkpoints", view: viewRuns},
 		menuItem{title: "Checkpoints", desc: "Browse all checkpoints", view: viewCheckpoints},
+		menuItem{title: "Chat", desc: "Chat with a checkpoint", view: viewChatPick},
 		menuItem{title: "Usage", desc: "API usage and quotas", view: viewUsage},
 		menuItem{title: "Settings", desc: "Configure preferences", view: viewSettings},
 	}
@@ -97,6 +104,12 @@ func initialModel() model {
 	settingsInput.CharLimit = 256
 	settingsInput.Width = 50
 
+	chatInput := textinput.New()
+	chatInput.Prompt = "> "
+	chatInput.Placeholder = "message…"
+	chatInput.CharLimit = 4000
+	chatInput.Width = 50
+
 	return model{
 		view:          viewMenu,
 		menu:          menu,
@@ -106,6 +119,7 @@ func initialModel() model {
 		styles:        styles,
 		err:           err,
 		settingsInput: settingsInput,
+		chatInput:     chatInput,
 		expandedRuns:  make(map[string]bool),
 		loadingRuns:   make(map[string]bool),
 		runCpsLoaded:  make(map[string]bool),
