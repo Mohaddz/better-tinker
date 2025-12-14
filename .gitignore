@@ -38,6 +38,6 @@ dist/
 tinker-cli
 tinker-cli.exe
 tinker-cli.exe~
-
+bridge/
 # Don’t track the shipped binaries in git (we’ll add them during release builds)
 better_tinker/bin/
