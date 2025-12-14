@@ -171,7 +171,7 @@ When the bridge server is running, you can access the interactive API documentat
 ### Build from source
 
 ```bash
-git clone https://github.com/mohadese/better-tinker.git
+git clone https://github.com/mohaddz/better-tinker.git
 cd better-tinker
 
 # Build Go binaries for all platforms

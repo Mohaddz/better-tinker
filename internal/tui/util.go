@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/mohadese/tinker-cli/internal/api"
+	"github.com/mohaddz/better-tinker/internal/api"
 )
 
 func truncate(s string, maxLen int) string {

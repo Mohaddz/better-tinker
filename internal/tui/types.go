@@ -1,6 +1,6 @@
 package tui
 
-import "github.com/mohadese/tinker-cli/internal/api"
+import "github.com/mohaddz/better-tinker/internal/api"
 
 type viewType int
 

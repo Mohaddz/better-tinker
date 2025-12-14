@@ -5,8 +5,8 @@ import (
 	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/textinput"
 	"github.com/charmbracelet/lipgloss"
-	"github.com/mohadese/tinker-cli/internal/api"
-	"github.com/mohadese/tinker-cli/internal/ui"
+	"github.com/mohaddz/better-tinker/internal/api"
+	"github.com/mohaddz/better-tinker/internal/ui"
 )
 
 // model is the main application model

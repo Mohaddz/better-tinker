@@ -7,7 +7,7 @@ import (
 	"github.com/charmbracelet/bubbles/list"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
-	"github.com/mohadese/tinker-cli/internal/ui"
+	"github.com/mohaddz/better-tinker/internal/ui"
 )
 
 type menuDelegate struct {

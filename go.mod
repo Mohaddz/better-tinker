@@ -1,4 +1,4 @@
-module github.com/mohadese/tinker-cli
+module github.com/mohaddz/better-tinker
 
 go 1.25.4
 

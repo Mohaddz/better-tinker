@@ -8,7 +8,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/mohadese/tinker-cli/internal/config"
+	"github.com/mohaddz/better-tinker/internal/config"
 )
 
 const (

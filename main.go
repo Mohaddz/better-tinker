@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/mohadese/tinker-cli/internal/tui"
+	"github.com/mohaddz/better-tinker/internal/tui"
 )
 
 func main() {

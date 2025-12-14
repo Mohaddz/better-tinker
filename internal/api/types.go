@@ -4,14 +4,14 @@ import "time"
 
 // TrainingRun represents a training run from the Tinker API
 type TrainingRun struct {
-	ID           string       `json:"training_run_id"`
-	BaseModel    string       `json:"base_model"`
-	IsLoRA       bool         `json:"is_lora"`
-	LoRAConfig   *LoRAConfig  `json:"lora_config,omitempty"`
-	Status       string       `json:"status"`
-	CreatedAt    time.Time    `json:"created_at"`
-	UpdatedAt    time.Time    `json:"updated_at"`
-	Checkpoints  []Checkpoint `json:"checkpoints,omitempty"` // Checkpoints belonging to this run
+	ID          string       `json:"training_run_id"`
+	BaseModel   string       `json:"base_model"`
+	IsLoRA      bool         `json:"is_lora"`
+	LoRAConfig  *LoRAConfig  `json:"lora_config,omitempty"`
+	Status      string       `json:"status"`
+	CreatedAt   time.Time    `json:"created_at"`
+	UpdatedAt   time.Time    `json:"updated_at"`
+	Checkpoints []Checkpoint `json:"checkpoints,omitempty"` // Checkpoints belonging to this run
 }
 
 // LoRAConfig holds LoRA-specific configuration
@@ -74,4 +74,3 @@ type UsageStats struct {
 	ComputeHours      float64 `json:"compute_hours"`
 	StorageGB         float64 `json:"storage_gb"`
 }
-

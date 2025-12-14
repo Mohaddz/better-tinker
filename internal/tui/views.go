@@ -5,8 +5,8 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
-	"github.com/mohadese/tinker-cli/internal/config"
-	"github.com/mohadese/tinker-cli/internal/ui"
+	"github.com/mohaddz/better-tinker/internal/config"
+	"github.com/mohaddz/better-tinker/internal/ui"
 )
 
 func (m model) View() string {

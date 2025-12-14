@@ -7,8 +7,8 @@ import (
 
 	"github.com/atotto/clipboard"
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/mohadese/tinker-cli/internal/api"
-	"github.com/mohadese/tinker-cli/internal/config"
+	"github.com/mohaddz/better-tinker/internal/api"
+	"github.com/mohaddz/better-tinker/internal/config"
 )
 
 func (m *model) prefetchNextRunCheckpointsCmd() tea.Cmd {
