@@ -29,6 +29,20 @@ type model struct {
 	chatMessages   []api.ChatMessage
 	chatInput      textinput.Model
 
+	// Compare state
+	compareCheckpointA *api.Checkpoint
+	compareCheckpointB *api.Checkpoint
+	compareBaseModelA  string
+	compareBaseModelB  string
+	compareMessages    []api.ChatMessage // Shared history
+	compareLoadingA    bool
+	compareLoadingB    bool
+	compareResponseA   string // Latest response for display
+	compareResponseB   string
+	compareInput       textinput.Model
+	compareScrollOffset int  // Scroll offset for transcript
+	compareTotalLines   int  // Total lines in transcript (for scroll bounds)
+
 	loading   bool
 	err       error
 	statusMsg string
@@ -84,6 +98,7 @@ func initialModel() model {
 		menuItem{title: "Training Runs", desc: "View runs with checkpoints", view: viewRuns},
 		menuItem{title: "Checkpoints", desc: "Browse all checkpoints", view: viewCheckpoints},
 		menuItem{title: "Chat", desc: "Chat with a checkpoint", view: viewChatPick},
+		menuItem{title: "Compare", desc: "Compare two checkpoints", view: viewComparePick},
 		menuItem{title: "Usage", desc: "API usage and quotas", view: viewUsage},
 		menuItem{title: "Settings", desc: "Configure preferences", view: viewSettings},
 	}
@@ -110,6 +125,12 @@ func initialModel() model {
 	chatInput.CharLimit = 4000
 	chatInput.Width = 50
 
+	compareInput := textinput.New()
+	compareInput.Prompt = "> "
+	compareInput.Placeholder = "message…"
+	compareInput.CharLimit = 4000
+	compareInput.Width = 50
+
 	return model{
 		view:          viewMenu,
 		menu:          menu,
@@ -120,6 +141,7 @@ func initialModel() model {
 		err:           err,
 		settingsInput: settingsInput,
 		chatInput:     chatInput,
+		compareInput:  compareInput,
 		expandedRuns:  make(map[string]bool),
 		loadingRuns:   make(map[string]bool),
 		runCpsLoaded:  make(map[string]bool),

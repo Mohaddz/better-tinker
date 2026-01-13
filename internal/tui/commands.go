@@ -3,6 +3,7 @@ package tui
 import (
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/atotto/clipboard"
@@ -195,4 +196,78 @@ func confirmEscCancel() tea.Cmd {
 	return tea.Tick(25*time.Millisecond, func(time.Time) tea.Msg {
 		return escCancelCheckMsg{}
 	})
+}
+
+// compareSample sends chat requests to two models in parallel and returns both responses.
+func compareSample(client *api.Client, pathA, baseA, pathB, baseB string, messages []api.ChatMessage) tea.Cmd {
+	return func() tea.Msg {
+		if client == nil {
+			return compareResponseMsg{errA: fmt.Errorf("not connected"), errB: fmt.Errorf("not connected")}
+		}
+
+		var wg sync.WaitGroup
+		var respA, respB *api.ChatResponse
+		var errA, errB error
+
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			respA, errA = client.ChatWithCheckpoint(api.ChatRequest{
+				ModelPath:   pathA,
+				BaseModel:   baseA,
+				Messages:    messages,
+				MaxTokens:   512,
+				Temperature: 0.7,
+				TopP:        0.9,
+			})
+		}()
+		go func() {
+			defer wg.Done()
+			respB, errB = client.ChatWithCheckpoint(api.ChatRequest{
+				ModelPath:   pathB,
+				BaseModel:   baseB,
+				Messages:    messages,
+				MaxTokens:   512,
+				Temperature: 0.7,
+				TopP:        0.9,
+			})
+		}()
+		wg.Wait()
+
+		contentA, contentB := "", ""
+		if respA != nil {
+			contentA = respA.Content
+		}
+		if respB != nil {
+			contentB = respB.Content
+		}
+
+		return compareResponseMsg{contentA: contentA, contentB: contentB, errA: errA, errB: errB}
+	}
+}
+
+// loadCompareTrainingRuns loads two training runs in parallel to get their base models.
+func loadCompareTrainingRuns(client *api.Client, runIDA, runIDB string) tea.Cmd {
+	return func() tea.Msg {
+		if client == nil {
+			return compareTrainingRunsLoadedMsg{errA: fmt.Errorf("not connected"), errB: fmt.Errorf("not connected")}
+		}
+
+		var wg sync.WaitGroup
+		var runA, runB *api.TrainingRun
+		var errA, errB error
+
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			runA, errA = client.GetTrainingRun(runIDA)
+		}()
+		go func() {
+			defer wg.Done()
+			runB, errB = client.GetTrainingRun(runIDB)
+		}()
+		wg.Wait()
+
+		return compareTrainingRunsLoadedMsg{runA: runA, runB: runB, errA: errA, errB: errB}
+	}
 }
