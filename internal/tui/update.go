@@ -666,13 +666,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.settingsMessage = ""
 				return m, nil
 			}
-			// Special handling for viewComparePick: if Model A is selected, clear it
-			if m.view == viewComparePick && m.compareCheckpointA != nil {
-				m.compareCheckpointA = nil
-				m.err = nil
-				m.statusMsg = ""
-				return m, nil
-			}
+		// Special handling for viewComparePick: if Model A is selected, clear it
+		if m.view == viewComparePick && m.compareCheckpointA != nil {
+			m.compareCheckpointA = nil
+			m.compareCheckpointB = nil
+			m.err = nil
+			m.statusMsg = ""
+			return m, nil
+		}
 			if m.view != viewMenu {
 				m.view = viewMenu
 				m.err = nil
