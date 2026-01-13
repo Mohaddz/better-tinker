@@ -1470,7 +1470,8 @@ func (m model) computeCompareTranscriptLines(width int, side string) []string {
 	return lines
 }
 
-// getVisibleLines extracts a portion of lines based on scroll offset
+// getVisibleLines extracts a portion of lines based on scroll offset.
+// Returns nil if offset is beyond available content (allows shorter pane to show empty).
 func getVisibleLines(allLines []string, offset, count int) []string {
 	if len(allLines) == 0 {
 		return nil
@@ -1479,7 +1480,7 @@ func getVisibleLines(allLines []string, offset, count int) []string {
 		offset = 0
 	}
 	if offset >= len(allLines) {
-		offset = len(allLines) - 1
+		return nil // Scrolled past content - return empty instead of clamping to last line
 	}
 	endIdx := offset + count
 	if endIdx > len(allLines) {

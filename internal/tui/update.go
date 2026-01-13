@@ -723,6 +723,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						m.compareMessages = nil
 						m.compareInput.Blur()
 						m.compareInput.SetValue("")
+						m.compareScrollOffset = 0
 						m.loading = true
 						return m, tea.Batch(m.spinner.Tick, loadRuns(m.client))
 					case viewUsage:
