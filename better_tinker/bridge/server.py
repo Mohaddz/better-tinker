@@ -36,6 +36,16 @@ try:
 except Exception:
     TINKER_COOKBOOK_AVAILABLE = False
 
+# OpenAI client for Tinker's OpenAI-compatible endpoint
+try:
+    from openai import OpenAI
+    OPENAI_AVAILABLE = True
+except ImportError:
+    OPENAI_AVAILABLE = False
+
+# Tinker's OpenAI-compatible API base URL
+TINKER_OAI_BASE_URL = "https://tinker.thinkingmachines.dev/services/tinker-prod/oai/api/v1"
+
 
 # ============================================================================
 # Pydantic Models for API responses
@@ -127,13 +137,14 @@ class ChatResponse(BaseModel):
 # Chat helpers
 # ============================================================================
 
-def _build_fallback_chat_prompt(messages: List["ChatMessage"]) -> str:
+def _build_fallback_chat_prompt(messages: List[Dict[str, str]]) -> str:
     # A very simple, model-agnostic chat template.
     # Not as high-quality as tinker_cookbook renderers, but works without extra deps.
+    # messages should be a list of dicts with "role" and "content" keys
     lines: list[str] = []
     for m in messages:
-        role = (m.role or "").lower()
-        content = (m.content or "").strip()
+        role = (m.get("role") or "").lower()
+        content = (m.get("content") or "").strip()
         if not content:
             continue
         if role == "system":
@@ -524,17 +535,23 @@ async def get_checkpoint_archive_url(training_run_id: str, checkpoint_id: str, r
 @app.post("/chat", response_model=ChatResponse)
 async def chat_with_checkpoint(request: Request, body: ChatRequest):
     """
-    Chat with a specific checkpoint (model weights) via SamplingClient.
+    Chat with a specific checkpoint (model weights) via Tinker's OpenAI-compatible API.
 
     The client should pass:
-    - model_path: checkpoint tinker path, e.g. "tinker://<run-id>/weights/<checkpoint>"
-    - base_model: base model name (optional but recommended for renderer/tokenizer)
+    - model_path: checkpoint tinker path, e.g. "tinker://<run-id>/sampler_weights/<checkpoint>"
+    - base_model: base model name (REQUIRED - used to select correct prompt renderer)
     - messages: chat history (system/user/assistant)
+    
+    Uses tinker_cookbook to render the prompt with the correct format for the model,
+    then calls Tinker's /completions endpoint (not /chat/completions) to avoid
+    template mismatches with LoRA-trained checkpoints.
+    
+    See: https://tinker-docs.thinkingmachines.ai/compatible-apis/openai
     """
-    if not TINKER_AVAILABLE:
+    if not OPENAI_AVAILABLE:
         raise HTTPException(
             status_code=503,
-            detail="Tinker SDK not installed. Please install with: pip install tinker",
+            detail="OpenAI package not installed. Please install with: pip install openai",
         )
 
     api_key = extract_api_key(request)
@@ -544,82 +561,70 @@ async def chat_with_checkpoint(request: Request, body: ChatRequest):
             detail="API key required. Pass via Authorization header or set TINKER_API_KEY env var.",
         )
 
-    service_client, _ = client_manager.get_client(api_key)
-    if service_client is None:
-        raise HTTPException(
-            status_code=503,
-            detail="Failed to initialize Tinker client. Please check your API key.",
-        )
-
     if not body.model_path or not body.model_path.strip():
         raise HTTPException(status_code=400, detail="model_path is required")
+    
+    if not body.base_model:
+        raise HTTPException(status_code=400, detail="base_model is required for correct prompt rendering")
+
+    # Filter out messages with None or empty content - format as dicts for tinker_cookbook
+    valid_messages = [{"role": m.role, "content": m.content} for m in body.messages if m.content]
+    if not valid_messages:
+        raise HTTPException(status_code=400, detail="At least one message with content is required")
 
     try:
-        os.environ["TOKENIZERS_PARALLELISM"] = "false"
-
-        sampling_client = service_client.create_sampling_client(model_path=body.model_path)
-
-        stop_sequences: list[str] = []
-        prompt_input = None
-        prompt_tokens: list[int] = []
-
-        if TINKER_COOKBOOK_AVAILABLE and body.base_model:
+        # Use tinker_cookbook to render the prompt with the correct format
+        # This ensures LoRA checkpoints get the same prompt format they were trained with
+        if TINKER_COOKBOOK_AVAILABLE:
             tokenizer = get_tokenizer(body.base_model)
-            renderer = renderers.get_renderer(get_recommended_renderer_name(body.base_model), tokenizer)
-            history: list[renderers.Message] = [
-                {"role": m.role, "content": m.content} for m in body.messages if m.content is not None
-            ]
-            model_input = renderer.build_generation_prompt(history)
+            renderer_name = get_recommended_renderer_name(body.base_model)
+            renderer = renderers.get_renderer(renderer_name, tokenizer)
+            
+            # Build the prompt using the correct renderer for this model
+            # valid_messages is already a list of dicts with "role" and "content" keys
+            model_input = renderer.build_generation_prompt(valid_messages)
             stop_sequences = renderer.get_stop_sequences()
-            # Some cookbook renderers return a string prompt; Tinker SDK requires ModelInput.
-            # We can reliably create ModelInput from token ids.
-            prompt_tokens = tokenizer.encode(model_input)
-            prompt_input = tinker.ModelInput.from_ints(prompt_tokens)
+            
+            # model_input is a ModelInput object - decode to string for OpenAI completions API
+            if hasattr(model_input, 'to_ints'):
+                prompt = tokenizer.decode(model_input.to_ints())
+            else:
+                # Fallback if it's already a string
+                prompt = str(model_input)
         else:
-            # Cookbook isn't available (or base_model not provided). Use a fallback prompt.
-            if not body.base_model:
-                raise HTTPException(status_code=400, detail="base_model is required for chat (tokenization)")
-
-            try:
-                from transformers import AutoTokenizer  # type: ignore
-            except Exception as e:
-                raise HTTPException(
-                    status_code=503,
-                    detail=f"transformers not installed for chat fallback: {e}",
-                )
-
-            tokenizer = AutoTokenizer.from_pretrained(body.base_model, trust_remote_code=True)
-            model_input = _build_fallback_chat_prompt(body.messages)
+            # Fallback: simple prompt format (may not work well with LoRAs)
+            prompt = _build_fallback_chat_prompt(valid_messages)
             stop_sequences = ["\nUser:", "\nSystem:"]
-            prompt_tokens = tokenizer.encode(model_input, add_special_tokens=False)
-            prompt_input = tinker.ModelInput.from_ints(prompt_tokens)
 
-        sampling_params = tinker_types.SamplingParams(
+        # Use Tinker's OpenAI-compatible /completions endpoint (NOT /chat/completions)
+        # This lets us control the exact prompt format
+        client = OpenAI(
+            base_url=TINKER_OAI_BASE_URL,
+            api_key=api_key,
+        )
+
+        response = client.completions.create(
+            model=body.model_path,
+            prompt=prompt,
             max_tokens=body.max_tokens,
             temperature=body.temperature,
             top_p=body.top_p,
-            stop=stop_sequences,
+            stop=stop_sequences if stop_sequences else None,
         )
 
-        response = sampling_client.sample(
-            prompt=prompt_input,
-            num_samples=1,
-            sampling_params=sampling_params,
-        ).result()
+        content = response.choices[0].text or ""
+        return ChatResponse(content=content.strip())
 
-        # If cookbook renderers are available, prefer parsing tokens. Otherwise, best-effort
-        # use the SDK-provided generated_text.
-        if TINKER_COOKBOOK_AVAILABLE and body.base_model:
-            parsed_message, _ = renderer.parse_response(response.sequences[0].tokens)
-            return ChatResponse(content=(parsed_message.get("content", "") or "").strip())
-
-        # Fallback: decode tokens and strip prompt.
-        out_tokens = response.sequences[0].tokens if response.sequences else []
-        return ChatResponse(content=_decode_completion_from_tokens(tokenizer, prompt_tokens, out_tokens))
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to chat: {str(e)}")
+        error_msg = str(e)
+        # Provide more helpful error messages
+        if "401" in error_msg or "unauthorized" in error_msg.lower():
+            raise HTTPException(status_code=401, detail="Invalid API key")
+        if "404" in error_msg or "not found" in error_msg.lower():
+            raise HTTPException(status_code=404, detail=f"Checkpoint not found: {body.model_path}")
+        raise HTTPException(status_code=500, detail=f"Failed to chat: {error_msg}")
 
 
 # ============================================================================
