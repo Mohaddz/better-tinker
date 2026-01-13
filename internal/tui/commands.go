@@ -199,7 +199,9 @@ func confirmEscCancel() tea.Cmd {
 }
 
 // compareSample sends chat requests to two models in parallel and returns both responses.
-func compareSample(client *api.Client, pathA, baseA, pathB, baseB string, messages []api.ChatMessage) tea.Cmd {
+// Each model receives its own message history (messagesA for model A, messagesB for model B)
+// to preserve per-model conversational context.
+func compareSample(client *api.Client, pathA, baseA, pathB, baseB string, messagesA, messagesB []api.ChatMessage) tea.Cmd {
 	return func() tea.Msg {
 		if client == nil {
 			return compareResponseMsg{errA: fmt.Errorf("not connected"), errB: fmt.Errorf("not connected")}
@@ -215,7 +217,7 @@ func compareSample(client *api.Client, pathA, baseA, pathB, baseB string, messag
 			respA, errA = client.ChatWithCheckpoint(api.ChatRequest{
 				ModelPath:   pathA,
 				BaseModel:   baseA,
-				Messages:    messages,
+				Messages:    messagesA,
 				MaxTokens:   512,
 				Temperature: 0.7,
 				TopP:        0.9,
@@ -226,7 +228,7 @@ func compareSample(client *api.Client, pathA, baseA, pathB, baseB string, messag
 			respB, errB = client.ChatWithCheckpoint(api.ChatRequest{
 				ModelPath:   pathB,
 				BaseModel:   baseB,
-				Messages:    messages,
+				Messages:    messagesB,
 				MaxTokens:   512,
 				Temperature: 0.7,
 				TopP:        0.9,

@@ -429,15 +429,29 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.compareLoadingB = true
 				m.err = nil
 
-				// Build messages for API (convert our format to standard format)
-				apiMessages := make([]api.ChatMessage, 0)
+				// Build separate message slices for each model to preserve per-model conversational context
+				apiMessagesA := make([]api.ChatMessage, 0)
+				apiMessagesB := make([]api.ChatMessage, 0)
 				for _, msg := range m.compareMessages {
 					role := msg.Role
-					if role == "assistant_a" || role == "assistant_b" {
-						// Skip individual assistant messages - we'll use user messages only for the prompt
-						continue
+					switch role {
+					case "user", "system":
+						// Include user and system messages in both slices
+						apiMessagesA = append(apiMessagesA, msg)
+						apiMessagesB = append(apiMessagesB, msg)
+					case "assistant_a":
+						// Map assistant_a to assistant for model A's history
+						apiMessagesA = append(apiMessagesA, api.ChatMessage{
+							Role:    "assistant",
+							Content: msg.Content,
+						})
+					case "assistant_b":
+						// Map assistant_b to assistant for model B's history
+						apiMessagesB = append(apiMessagesB, api.ChatMessage{
+							Role:    "assistant",
+							Content: msg.Content,
+						})
 					}
-					apiMessages = append(apiMessages, msg)
 				}
 
 				return m, tea.Batch(
@@ -446,7 +460,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						m.client,
 						m.compareCheckpointA.TinkerPath, m.compareBaseModelA,
 						m.compareCheckpointB.TinkerPath, m.compareBaseModelB,
-						apiMessages,
+						apiMessagesA, apiMessagesB,
 					),
 				)
 			case "up", "k":
@@ -927,7 +941,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.prefetchQueue = nil
 					m.treeCursor = 0
 					m.scrollOffset = 0
-					// Keep selected checkpoints on refresh
+					// Clear checkpoint pointers to avoid dangling references after m.runs is replaced by loadRuns.
+					// m.compareCheckpointA and m.compareCheckpointB point into m.runs, which becomes stale after refresh.
+					m.compareCheckpointA = nil
+					m.compareCheckpointB = nil
 					return m, tea.Batch(m.spinner.Tick, loadRuns(m.client))
 				case viewUsage:
 					return m, tea.Batch(m.spinner.Tick, loadUsage(m.client))
