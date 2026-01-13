@@ -22,6 +22,10 @@ func (m model) View() string {
 		return m.chatPickView()
 	case viewChat:
 		return m.chatView()
+	case viewComparePick:
+		return m.comparePickView()
+	case viewCompareChat:
+		return m.compareView()
 	case viewUsage:
 		return m.usageView()
 	case viewSettings:
@@ -175,7 +179,7 @@ func (m model) renderRunRow(runIdx int, isSelected bool) string {
 	}
 
 	cpCount := runCheckpointCount(run.Checkpoints)
-	if m.view == viewChatPick {
+	if m.view == viewChatPick || m.view == viewComparePick {
 		cpCount = samplingCheckpointCount(run.Checkpoints)
 	}
 	cpCountStr := "–"
@@ -270,8 +274,8 @@ func (m model) renderCheckpointRow(runIdx, cpIdx int, isSelected bool) string {
 	}
 	cp := run.Checkpoints[cpIdx]
 
-	if m.view == viewChatPick {
-		// Minimal row for chat selection: show only sampling checkpoints.
+	if m.view == viewChatPick || m.view == viewComparePick {
+		// Minimal row for chat/compare selection: show only sampling checkpoints.
 		if !isSamplingCheckpoint(cp) {
 			return ""
 		}
@@ -1015,4 +1019,480 @@ func (m model) getAPIKeyStatus() string {
 	default:
 		return "not set"
 	}
+}
+
+func (m model) comparePickView() string {
+	var b strings.Builder
+
+	title := m.styles.Title.Render("compare")
+	b.WriteString(title)
+	b.WriteString("\n")
+
+	// Show selection state
+	if m.compareCheckpointA != nil {
+		nameA := m.compareCheckpointA.Name
+		if strings.TrimSpace(nameA) == "" {
+			nameA = lastPathSegment(m.compareCheckpointA.TinkerPath)
+		}
+		selectedStyle := lipgloss.NewStyle().Foreground(ui.ColorSuccess)
+		b.WriteString(selectedStyle.Render("Model A: " + truncate(nameA, 30)))
+		b.WriteString("\n")
+		b.WriteString(m.styles.Description.Render("now select Model B"))
+	} else {
+		b.WriteString(m.styles.Description.Render("select Model A"))
+	}
+	b.WriteString("\n\n")
+
+	if m.loading && len(m.runs) == 0 {
+		b.WriteString(fmt.Sprintf("%s loading...\n", m.spinner.View()))
+	} else if m.err != nil {
+		b.WriteString(m.styles.ErrorBox.Render(fmt.Sprintf("error: %s", m.err)))
+	} else {
+		b.WriteString(m.renderTreeView())
+	}
+
+	var help string
+	if m.compareCheckpointA != nil {
+		help = m.styles.RenderHelp("↑↓", "move", "space", "expand", "enter", "select B", "r", "refresh", "esc", "clear A")
+	} else {
+		help = m.styles.RenderHelp("↑↓", "move", "space", "expand", "enter", "select A", "r", "refresh", "esc", "back")
+	}
+	footer := m.styles.Help.Render(help)
+	return m.renderWithFooter(b.String(), footer)
+}
+
+func (m model) compareView() string {
+	// Split-pane chat view for comparing two checkpoints
+	help := m.styles.RenderHelp("enter", "send", "↑↓", "scroll", "ctrl+n", "new", "esc", "back")
+	footer := strings.TrimRight(m.styles.Help.Render(help), "\n")
+	footerH := textHeight(footer)
+	innerH := m.innerHeight()
+
+	contentW := m.contentWidth()
+	if contentW <= 0 {
+		contentW = 80
+	}
+
+	// Calculate pane widths - split in half with a divider
+	paneW := (contentW - 3) / 2 // 3 for the divider " │ "
+	if paneW < 20 {
+		paneW = 20
+	}
+
+	// Get checkpoint names and base models
+	nameA := "Model A"
+	modelA := ""
+	if m.compareCheckpointA != nil {
+		nameA = m.compareCheckpointA.Name
+		if strings.TrimSpace(nameA) == "" {
+			nameA = lastPathSegment(m.compareCheckpointA.TinkerPath)
+		}
+	}
+	if m.compareBaseModelA != "" {
+		modelA = m.compareBaseModelA
+	}
+	nameB := "Model B"
+	modelB := ""
+	if m.compareCheckpointB != nil {
+		nameB = m.compareCheckpointB.Name
+		if strings.TrimSpace(nameB) == "" {
+			nameB = lastPathSegment(m.compareCheckpointB.TinkerPath)
+		}
+	}
+	if m.compareBaseModelB != "" {
+		modelB = m.compareBaseModelB
+	}
+
+	// Build header content with checkpoint name and base model
+	headerContentA := nameA
+	if modelA != "" {
+		// Show "checkpoint · model" format
+		available := paneW - 4 // account for padding
+		nameW := len(nameA)
+		modelW := len(modelA)
+		sep := " · "
+		if nameW+len(sep)+modelW > available {
+			// Truncate to fit
+			modelW = available - nameW - len(sep)
+			if modelW < 6 {
+				// Just show the checkpoint name
+				headerContentA = truncate(nameA, available)
+			} else {
+				headerContentA = nameA + sep + truncate(modelA, modelW)
+			}
+		} else {
+			headerContentA = nameA + sep + modelA
+		}
+	}
+	headerContentB := nameB
+	if modelB != "" {
+		available := paneW - 4
+		nameW := len(nameB)
+		modelW := len(modelB)
+		sep := " · "
+		if nameW+len(sep)+modelW > available {
+			modelW = available - nameW - len(sep)
+			if modelW < 6 {
+				headerContentB = truncate(nameB, available)
+			} else {
+				headerContentB = nameB + sep + truncate(modelB, modelW)
+			}
+		} else {
+			headerContentB = nameB + sep + modelB
+		}
+	}
+
+	// Header bar style
+	headerStyleA := lipgloss.NewStyle().
+		Foreground(ui.ColorTextBright).
+		Background(ui.ColorBgMedium).
+		Padding(0, 1).
+		Width(paneW)
+	headerStyleB := lipgloss.NewStyle().
+		Foreground(ui.ColorTextBright).
+		Background(ui.ColorBgMedium).
+		Padding(0, 1).
+		Width(paneW)
+
+	headerA := headerStyleA.Render(truncate(headerContentA, paneW-2))
+	headerB := headerStyleB.Render(truncate(headerContentB, paneW-2))
+
+	dividerStyle := lipgloss.NewStyle().Foreground(ui.ColorTextMuted)
+	headerRow := headerA + dividerStyle.Render(" │ ") + headerB
+
+	// Error display
+	var errLine string
+	if m.err != nil {
+		errLine = m.styles.ErrorBox.Render(fmt.Sprintf("error: %s", m.err))
+	}
+
+	// Input box (spans full width)
+	boxW := contentW - 4
+	if boxW < 10 {
+		boxW = 10
+	}
+	boxStyle := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(ui.ColorTextMuted).
+		Padding(0, 1).
+		Width(boxW)
+
+	inputInner := m.compareInputView()
+	inputBox := boxStyle.Render(inputInner)
+	inputBox = strings.TrimRight(inputBox, "\n")
+	inputH := textHeight(inputBox)
+
+	// Thinking/loading indicators
+	thinkingA := ""
+	thinkingB := ""
+	thinkingH := 0
+	if m.compareLoadingA || m.compareLoadingB {
+		thinkingH = 1
+		if m.compareLoadingA {
+			thinkingA = m.spinner.View() + " thinking…"
+		} else {
+			thinkingA = strings.Repeat(" ", paneW)
+		}
+		if m.compareLoadingB {
+			thinkingB = m.spinner.View() + " thinking…"
+		} else {
+			thinkingB = strings.Repeat(" ", paneW)
+		}
+	}
+
+	// Calculate available height for transcripts
+	headerH := 1 // header row
+	if errLine != "" {
+		headerH += textHeight(errLine) + 1
+	}
+
+	const sepLines = 4 // spacing around elements
+	availH := innerH - footerH - headerH - inputH - thinkingH - sepLines
+	if availH < 3 {
+		availH = 3
+	}
+
+	// Render transcripts side by side with scrolling
+	allLinesA := m.computeCompareTranscriptLines(paneW, "A")
+	allLinesB := m.computeCompareTranscriptLines(paneW, "B")
+
+	// Find the max total lines between both panes for scroll bounds
+	maxTotalLines := len(allLinesA)
+	if len(allLinesB) > maxTotalLines {
+		maxTotalLines = len(allLinesB)
+	}
+
+	// Apply scroll offset
+	scrollOffset := m.compareScrollOffset
+	if scrollOffset < 0 {
+		scrollOffset = 0
+	}
+	maxScroll := maxTotalLines - availH
+	if maxScroll < 0 {
+		maxScroll = 0
+	}
+	if scrollOffset > maxScroll {
+		scrollOffset = maxScroll
+	}
+
+	// Extract visible lines based on scroll
+	linesA := getVisibleLines(allLinesA, scrollOffset, availH)
+	linesB := getVisibleLines(allLinesB, scrollOffset, availH)
+
+	// If no messages, show placeholder
+	if len(allLinesA) == 0 && len(allLinesB) == 0 {
+		placeholder := m.styles.Description.Render("start typing to compare")
+		linesA = []string{placeholder}
+		linesB = []string{placeholder}
+	}
+
+	// Pad to same height
+	for len(linesA) < availH {
+		linesA = append(linesA, strings.Repeat(" ", paneW))
+	}
+	for len(linesB) < availH {
+		linesB = append(linesB, strings.Repeat(" ", paneW))
+	}
+
+	// Show scroll indicator if content is scrollable
+	showScrollIndicator := maxTotalLines > availH
+
+	// Join lines with divider
+	var transcriptRows strings.Builder
+	maxLines := len(linesA)
+	if len(linesB) > maxLines {
+		maxLines = len(linesB)
+	}
+	for i := 0; i < maxLines; i++ {
+		lineA := ""
+		lineB := ""
+		if i < len(linesA) {
+			lineA = linesA[i]
+		}
+		if i < len(linesB) {
+			lineB = linesB[i]
+		}
+		// Pad lines to paneW
+		lineA = padRight(lineA, paneW)
+		lineB = padRight(lineB, paneW)
+		transcriptRows.WriteString(lineA)
+		transcriptRows.WriteString(dividerStyle.Render(" │ "))
+		transcriptRows.WriteString(lineB)
+		if i < maxLines-1 {
+			transcriptRows.WriteString("\n")
+		}
+	}
+
+	// Build final output
+	var out strings.Builder
+	out.WriteString(headerRow)
+	out.WriteString("\n")
+
+	if errLine != "" {
+		out.WriteString(errLine)
+		out.WriteString("\n")
+	}
+
+	// Show scroll position indicator
+	if showScrollIndicator {
+		scrollInfo := fmt.Sprintf("lines %d-%d of %d", scrollOffset+1, scrollOffset+availH, maxTotalLines)
+		scrollIndicator := m.styles.Description.Render(scrollInfo)
+		out.WriteString(scrollIndicator)
+	}
+	out.WriteString("\n")
+
+	out.WriteString(transcriptRows.String())
+	out.WriteString("\n\n")
+
+	if thinkingH > 0 {
+		thinkingRow := padRight(m.styles.Description.Render(thinkingA), paneW) +
+			dividerStyle.Render(" │ ") +
+			padRight(m.styles.Description.Render(thinkingB), paneW)
+		out.WriteString(thinkingRow)
+		out.WriteString("\n\n")
+	}
+
+	out.WriteString(inputBox)
+	out.WriteString("\n")
+	out.WriteString(footer)
+
+	return m.appStyle().Render(out.String())
+}
+
+func (m model) compareInputView() string {
+	val := m.compareInput.Value()
+	isRTL := containsArabic(val)
+	if !isRTL {
+		return m.compareInput.View()
+	}
+
+	// RTL-friendly input handling (same as chatInputView)
+	prompt := m.compareInput.Prompt
+	if prompt == "" {
+		prompt = "> "
+	}
+
+	display := val
+	if visualRTLMode() {
+		display = bidiVisualLine(display)
+	}
+
+	if strings.TrimSpace(display) == "" {
+		ph := m.compareInput.Placeholder
+		if ph == "" {
+			ph = "message…"
+		}
+		return lipgloss.NewStyle().Foreground(ui.ColorTextDim).Render(prompt + ph)
+	}
+
+	maxW := m.compareInput.Width
+	if maxW <= 0 {
+		maxW = m.contentWidth()
+	}
+	maxW -= lipgloss.Width(prompt)
+	if maxW < 10 {
+		maxW = 10
+	}
+	display = truncateLeftRunes(display, maxW)
+
+	cursor := ""
+	if m.compareInput.Focused() {
+		cursor = lipgloss.NewStyle().Foreground(ui.ColorTextBright).Render("▍")
+	}
+
+	return prompt + display + cursor
+}
+
+// computeCompareTranscriptLines returns all lines for one side of the compare transcript
+func (m model) computeCompareTranscriptLines(width int, side string) []string {
+	if width <= 0 {
+		width = 40
+	}
+
+	rtlMode := false
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("BETTER_TINKER_RTL"))) {
+	case "1", "true", "yes", "on":
+		rtlMode = true
+	}
+
+	visualRTL := visualRTLMode()
+
+	var lines []string
+	for _, msg := range m.compareMessages {
+		role := strings.ToLower(strings.TrimSpace(msg.Role))
+		label := ""
+		textStyle := lipgloss.NewStyle().Foreground(ui.ColorTextNormal)
+		labelStyle := lipgloss.NewStyle().Foreground(ui.ColorTextDim)
+
+		switch role {
+		case "user":
+			label = "you"
+			textStyle = lipgloss.NewStyle().Foreground(ui.ColorTextBright)
+		case "assistant_a":
+			if side != "A" {
+				continue
+			}
+			label = "bot"
+			textStyle = lipgloss.NewStyle().Foreground(ui.ColorTextNormal)
+		case "assistant_b":
+			if side != "B" {
+				continue
+			}
+			label = "bot"
+			textStyle = lipgloss.NewStyle().Foreground(ui.ColorTextNormal)
+		case "assistant":
+			// Legacy single assistant - show on both sides
+			label = "bot"
+			textStyle = lipgloss.NewStyle().Foreground(ui.ColorTextNormal)
+		case "system":
+			continue // Skip system messages in transcript
+		default:
+			continue
+		}
+
+		text := strings.TrimRight(msg.Content, "\n")
+		if text == "" {
+			continue
+		}
+
+		isRTL := rtlMode || containsArabic(text)
+
+		if isRTL {
+			if label != "" {
+				lines = append(lines, labelStyle.Render(label))
+			}
+			if visualRTL {
+				text = bidiVisual(text)
+			}
+			for _, ln := range wrapTextLines(text, width-2) {
+				if ln == "" {
+					lines = append(lines, "")
+					continue
+				}
+				lines = append(lines, textStyle.Render(ln))
+			}
+			lines = append(lines, "")
+			continue
+		}
+
+		// LTR rendering
+		const gutterW = 4
+		prefix := ""
+		indent := ""
+		if label != "" {
+			prefix = fmt.Sprintf("%-*s ", gutterW, labelStyle.Render(label))
+			indent = strings.Repeat(" ", gutterW+1)
+		}
+
+		wrapW := width - (gutterW + 1)
+		if label == "" {
+			wrapW = width
+		}
+		if wrapW < 10 {
+			wrapW = 10
+		}
+
+		for j, ln := range wrapTextLines(text, wrapW) {
+			if j == 0 {
+				lines = append(lines, prefix+textStyle.Render(ln))
+			} else {
+				lines = append(lines, indent+textStyle.Render(ln))
+			}
+		}
+		lines = append(lines, "")
+	}
+
+	// Trim trailing blank lines
+	for len(lines) > 0 && strings.TrimSpace(lines[len(lines)-1]) == "" {
+		lines = lines[:len(lines)-1]
+	}
+
+	return lines
+}
+
+// getVisibleLines extracts a portion of lines based on scroll offset.
+// Returns nil if offset is beyond available content (allows shorter pane to show empty).
+func getVisibleLines(allLines []string, offset, count int) []string {
+	if len(allLines) == 0 {
+		return nil
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	if offset >= len(allLines) {
+		return nil // Scrolled past content - return empty instead of clamping to last line
+	}
+	endIdx := offset + count
+	if endIdx > len(allLines) {
+		endIdx = len(allLines)
+	}
+	return allLines[offset:endIdx]
+}
+
+func padRight(s string, width int) string {
+	visW := lipgloss.Width(s)
+	if visW >= width {
+		return s
+	}
+	return s + strings.Repeat(" ", width-visW)
 }

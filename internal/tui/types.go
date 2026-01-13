@@ -12,6 +12,8 @@ const (
 	viewSettings
 	viewChatPick
 	viewChat
+	viewComparePick  // Select two checkpoints for comparison
+	viewCompareChat  // Side-by-side chat view
 )
 
 type menuItem struct {
@@ -87,4 +89,18 @@ type trainingRunLoadedMsg struct {
 type chatResponseMsg struct {
 	content string
 	err     error
+}
+
+type compareResponseMsg struct {
+	contentA string
+	contentB string
+	errA     error
+	errB     error
+}
+
+type compareTrainingRunsLoadedMsg struct {
+	runA *api.TrainingRun
+	runB *api.TrainingRun
+	errA error
+	errB error
 }

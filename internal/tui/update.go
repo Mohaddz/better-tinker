@@ -59,6 +59,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				w = 10
 			}
 			m.chatInput.Width = w
+			m.compareInput.Width = w
 		}
 		return m, nil
 
@@ -106,7 +107,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		m.rebuildTreeItems()
-		if wasPrefetch && (m.view == viewRuns || m.view == viewChatPick) {
+		if wasPrefetch && (m.view == viewRuns || m.view == viewChatPick || m.view == viewComparePick) {
 			return m, (&m).prefetchNextRunCheckpointsCmd()
 		}
 		return m, nil
@@ -172,6 +173,64 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		})
 		return m, nil
 
+	case compareTrainingRunsLoadedMsg:
+		m.loading = false
+		if msg.errA != nil {
+			m.err = fmt.Errorf("Model A: %w", msg.errA)
+			return m, nil
+		}
+		if msg.errB != nil {
+			m.err = fmt.Errorf("Model B: %w", msg.errB)
+			return m, nil
+		}
+		if msg.runA != nil {
+			m.compareBaseModelA = msg.runA.BaseModel
+		}
+		if msg.runB != nil {
+			m.compareBaseModelB = msg.runB.BaseModel
+		}
+		m.compareMessages = nil
+		m.compareInput.SetValue("")
+		m.compareInput.Focus()
+		m.view = viewCompareChat
+		m.err = nil
+		m.statusMsg = ""
+		return m, textinput.Blink
+
+	case compareResponseMsg:
+		m.compareLoadingA = false
+		m.compareLoadingB = false
+		// Handle errors - show in respective panes
+		if msg.errA != nil && msg.errB != nil {
+			m.err = fmt.Errorf("both models failed: A: %v, B: %v", msg.errA, msg.errB)
+			return m, nil
+		}
+		// Add responses to shared history
+		if msg.errA != nil {
+			m.compareMessages = append(m.compareMessages, api.ChatMessage{
+				Role:    "assistant_a",
+				Content: fmt.Sprintf("error: %s", msg.errA),
+			})
+		} else {
+			m.compareMessages = append(m.compareMessages, api.ChatMessage{
+				Role:    "assistant_a",
+				Content: cleanAssistantText(msg.contentA),
+			})
+		}
+		if msg.errB != nil {
+			m.compareMessages = append(m.compareMessages, api.ChatMessage{
+				Role:    "assistant_b",
+				Content: fmt.Sprintf("error: %s", msg.errB),
+			})
+		} else {
+			m.compareMessages = append(m.compareMessages, api.ChatMessage{
+				Role:    "assistant_b",
+				Content: cleanAssistantText(msg.contentB),
+			})
+		}
+		m.err = nil
+		return m, nil
+
 	case actionCompleteMsg:
 		m.loading = false
 		m.showConfirm = false
@@ -232,10 +291,28 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case spinner.TickMsg:
-		if m.loading || len(m.loadingRuns) > 0 {
+		if m.loading || len(m.loadingRuns) > 0 || m.compareLoadingA || m.compareLoadingB {
 			var cmd tea.Cmd
 			m.spinner, cmd = m.spinner.Update(msg)
 			cmds = append(cmds, cmd)
+		}
+
+	case tea.MouseMsg:
+		// Handle mouse scroll in compare view
+		if m.view == viewCompareChat {
+			switch msg.Button {
+			case tea.MouseButtonWheelUp:
+				if m.compareScrollOffset > 0 {
+					m.compareScrollOffset -= 3
+					if m.compareScrollOffset < 0 {
+						m.compareScrollOffset = 0
+					}
+				}
+				return m, nil
+			case tea.MouseButtonWheelDown:
+				m.compareScrollOffset += 3
+				return m, nil
+			}
 		}
 
 	case tea.KeyMsg:
@@ -293,6 +370,133 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				// between terminal visual order and internal cursor position.
 				if containsArabic(m.chatInput.Value()) && visualRTLMode() {
 					m.chatInput.SetCursor(len([]rune(m.chatInput.Value())))
+				}
+				return m, cmd
+			}
+		}
+
+		// Compare chat input handling
+		if m.view == viewCompareChat {
+			switch msg.String() {
+			case "esc":
+				m.compareInput.Blur()
+				m.view = viewComparePick
+				m.err = nil
+				m.statusMsg = ""
+				return m, nil
+			case "ctrl+c":
+				m.compareInput.Blur()
+				m.view = viewMenu
+				m.err = nil
+				m.statusMsg = ""
+				// Clear compare state
+				m.compareCheckpointA = nil
+				m.compareCheckpointB = nil
+				m.compareMessages = nil
+				return m, nil
+			case "ctrl+n":
+				m.compareMessages = nil
+				m.compareInput.SetValue("")
+				m.compareScrollOffset = 0
+				m.err = nil
+				m.statusMsg = ""
+				return m, nil
+			case "enter":
+				userInput := strings.TrimSpace(m.compareInput.Value())
+				if userInput == "" {
+					return m, nil
+				}
+				if m.compareCheckpointA == nil || m.compareCheckpointB == nil {
+					m.err = fmt.Errorf("both checkpoints must be selected")
+					return m, nil
+				}
+				if m.compareCheckpointA.TinkerPath == "" || m.compareCheckpointB.TinkerPath == "" {
+					m.err = fmt.Errorf("checkpoint has no tinker path")
+					return m, nil
+				}
+				if m.compareBaseModelA == "" || m.compareBaseModelB == "" {
+					m.err = fmt.Errorf("missing base model for chat")
+					return m, nil
+				}
+
+				// Add user message to shared history
+				m.compareMessages = append(m.compareMessages, api.ChatMessage{
+					Role:    "user",
+					Content: userInput,
+				})
+				m.compareInput.SetValue("")
+				m.compareLoadingA = true
+				m.compareLoadingB = true
+				m.err = nil
+
+				// Build separate message slices for each model to preserve per-model conversational context
+				apiMessagesA := make([]api.ChatMessage, 0)
+				apiMessagesB := make([]api.ChatMessage, 0)
+				for _, msg := range m.compareMessages {
+					role := msg.Role
+					switch role {
+					case "user", "system":
+						// Include user and system messages in both slices
+						apiMessagesA = append(apiMessagesA, msg)
+						apiMessagesB = append(apiMessagesB, msg)
+					case "assistant_a":
+						// Map assistant_a to assistant for model A's history
+						apiMessagesA = append(apiMessagesA, api.ChatMessage{
+							Role:    "assistant",
+							Content: msg.Content,
+						})
+					case "assistant_b":
+						// Map assistant_b to assistant for model B's history
+						apiMessagesB = append(apiMessagesB, api.ChatMessage{
+							Role:    "assistant",
+							Content: msg.Content,
+						})
+					}
+				}
+
+				return m, tea.Batch(
+					m.spinner.Tick,
+					compareSample(
+						m.client,
+						m.compareCheckpointA.TinkerPath, m.compareBaseModelA,
+						m.compareCheckpointB.TinkerPath, m.compareBaseModelB,
+						apiMessagesA, apiMessagesB,
+					),
+				)
+			case "up", "k":
+				// Scroll up
+				if m.compareScrollOffset > 0 {
+					m.compareScrollOffset--
+				}
+				return m, nil
+			case "down", "j":
+				// Scroll down
+				m.compareScrollOffset++
+				return m, nil
+			case "pgup":
+				// Scroll up by page
+				m.compareScrollOffset -= 10
+				if m.compareScrollOffset < 0 {
+					m.compareScrollOffset = 0
+				}
+				return m, nil
+			case "pgdown":
+				// Scroll down by page
+				m.compareScrollOffset += 10
+				return m, nil
+			case "home":
+				// Scroll to top
+				m.compareScrollOffset = 0
+				return m, nil
+			case "end":
+				// Scroll to bottom (will be clamped in view)
+				m.compareScrollOffset = 999999
+				return m, nil
+			default:
+				var cmd tea.Cmd
+				m.compareInput, cmd = m.compareInput.Update(msg)
+				if containsArabic(m.compareInput.Value()) && visualRTLMode() {
+					m.compareInput.SetCursor(len([]rune(m.compareInput.Value())))
 				}
 				return m, cmd
 			}
@@ -462,6 +666,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.settingsMessage = ""
 				return m, nil
 			}
+		// Special handling for viewComparePick: if Model A is selected, clear it
+		if m.view == viewComparePick && m.compareCheckpointA != nil {
+			m.compareCheckpointA = nil
+			m.compareCheckpointB = nil
+			m.err = nil
+			m.statusMsg = ""
+			return m, nil
+		}
 			if m.view != viewMenu {
 				m.view = viewMenu
 				m.err = nil
@@ -508,6 +720,25 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						m.chatMessages = nil
 						m.chatInput.Blur()
 						m.chatInput.SetValue("")
+						m.loading = true
+						return m, tea.Batch(m.spinner.Tick, loadRuns(m.client))
+					case viewComparePick:
+						m.expandedRuns = make(map[string]bool)
+						m.loadingRuns = make(map[string]bool)
+						m.runCpsLoaded = make(map[string]bool)
+						m.prefetching = make(map[string]bool)
+						m.prefetchQueue = nil
+						m.treeCursor = 0
+						m.scrollOffset = 0
+
+						m.compareCheckpointA = nil
+						m.compareCheckpointB = nil
+						m.compareBaseModelA = ""
+						m.compareBaseModelB = ""
+						m.compareMessages = nil
+						m.compareInput.Blur()
+						m.compareInput.SetValue("")
+						m.compareScrollOffset = 0
 						m.loading = true
 						return m, tea.Batch(m.spinner.Tick, loadRuns(m.client))
 					case viewUsage:
@@ -607,6 +838,78 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, tea.Batch(m.spinner.Tick, loadTrainingRun(m.client, run.ID))
 			}
 
+			// Compare pick view: two-stage checkpoint selection
+			if m.view == viewComparePick && !m.loading {
+				if m.treeCursor < 0 || m.treeCursor >= len(m.treeItems) {
+					return m, nil
+				}
+				item := m.treeItems[m.treeCursor]
+				if item.isRun {
+					// Toggle expansion (same as space in other views)
+					if item.runIndex < len(m.runs) {
+						run := m.runs[item.runIndex]
+						if m.expandedRuns[run.ID] {
+							delete(m.expandedRuns, run.ID)
+							m.rebuildTreeItems()
+							return m, nil
+						}
+						m.expandedRuns[run.ID] = true
+						if !m.runCpsLoaded[run.ID] && !m.loadingRuns[run.ID] && !m.prefetching[run.ID] {
+							m.loadingRuns[run.ID] = true
+							m.rebuildTreeItems()
+							return m, tea.Batch(m.spinner.Tick, loadRunCheckpoints(m.client, run.ID))
+						}
+						if !m.runCpsLoaded[run.ID] && m.prefetching[run.ID] {
+							m.loadingRuns[run.ID] = true
+						}
+						m.rebuildTreeItems()
+					}
+					return m, nil
+				}
+
+				// Select checkpoint
+				if item.runIndex >= len(m.runs) {
+					return m, nil
+				}
+				run := m.runs[item.runIndex]
+				if item.cpIndex < 0 || item.cpIndex >= len(run.Checkpoints) {
+					return m, nil
+				}
+				cp := &m.runs[item.runIndex].Checkpoints[item.cpIndex]
+				if !isSamplingCheckpoint(*cp) {
+					return m, nil
+				}
+
+				if m.compareCheckpointA == nil {
+					// First selection: set Model A
+					m.compareCheckpointA = cp
+					m.err = nil
+					m.statusMsg = ""
+					return m, nil
+				}
+
+				// Second selection: set Model B and load both base models
+				// Don't allow selecting the same checkpoint
+				if m.compareCheckpointA.TinkerPath == cp.TinkerPath {
+					m.statusMsg = "select a different checkpoint for Model B"
+					return m, nil
+				}
+
+				m.compareCheckpointB = cp
+				m.compareMessages = nil
+				m.compareInput.Blur()
+				m.compareInput.SetValue("")
+				m.loading = true
+				m.err = nil
+				m.statusMsg = ""
+
+				// Load both training runs to get base models
+				return m, tea.Batch(
+					m.spinner.Tick,
+					loadCompareTrainingRuns(m.client, m.compareCheckpointA.TrainingRunID, m.compareCheckpointB.TrainingRunID),
+				)
+			}
+
 		case "r":
 			if m.view != viewMenu {
 				m.loading = true
@@ -630,6 +933,19 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.prefetchQueue = nil
 					m.treeCursor = 0
 					m.scrollOffset = 0
+					return m, tea.Batch(m.spinner.Tick, loadRuns(m.client))
+				case viewComparePick:
+					m.expandedRuns = make(map[string]bool)
+					m.loadingRuns = make(map[string]bool)
+					m.runCpsLoaded = make(map[string]bool)
+					m.prefetching = make(map[string]bool)
+					m.prefetchQueue = nil
+					m.treeCursor = 0
+					m.scrollOffset = 0
+					// Clear checkpoint pointers to avoid dangling references after m.runs is replaced by loadRuns.
+					// m.compareCheckpointA and m.compareCheckpointB point into m.runs, which becomes stale after refresh.
+					m.compareCheckpointA = nil
+					m.compareCheckpointB = nil
 					return m, tea.Batch(m.spinner.Tick, loadRuns(m.client))
 				case viewUsage:
 					return m, tea.Batch(m.spinner.Tick, loadUsage(m.client))
@@ -693,7 +1009,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 
 		case " ":
-			if (m.view == viewRuns || m.view == viewChatPick) && !m.loading {
+			if (m.view == viewRuns || m.view == viewChatPick || m.view == viewComparePick) && !m.loading {
 				if m.treeCursor >= 0 && m.treeCursor < len(m.treeItems) {
 					item := m.treeItems[m.treeCursor]
 					if item.isRun && item.runIndex < len(m.runs) {
@@ -723,7 +1039,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				return m, nil
 			}
-			if (m.view == viewRuns || m.view == viewChatPick) && !m.loading {
+			if (m.view == viewRuns || m.view == viewChatPick || m.view == viewComparePick) && !m.loading {
 				if m.treeCursor > 0 {
 					m.treeCursor--
 					m.ensureTreeVisible()
@@ -745,7 +1061,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				return m, nil
 			}
-			if (m.view == viewRuns || m.view == viewChatPick) && !m.loading {
+			if (m.view == viewRuns || m.view == viewChatPick || m.view == viewComparePick) && !m.loading {
 				if m.treeCursor < len(m.treeItems)-1 {
 					m.treeCursor++
 					m.ensureTreeVisible()
@@ -777,6 +1093,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		var cmd tea.Cmd
 		m.chatInput, cmd = m.chatInput.Update(msg)
 		cmds = append(cmds, cmd)
+	case viewCompareChat:
+		var cmd tea.Cmd
+		m.compareInput, cmd = m.compareInput.Update(msg)
+		cmds = append(cmds, cmd)
 	}
 
 	return m, tea.Batch(cmds...)
@@ -794,7 +1114,7 @@ func (m *model) rebuildTreeItems() {
 
 		if m.expandedRuns[run.ID] {
 			for cpIdx := range run.Checkpoints {
-				if m.view == viewChatPick && !isSamplingCheckpoint(run.Checkpoints[cpIdx]) {
+				if (m.view == viewChatPick || m.view == viewComparePick) && !isSamplingCheckpoint(run.Checkpoints[cpIdx]) {
 					continue
 				}
 				m.treeItems = append(m.treeItems, treeItem{
